@@ -1,11 +1,12 @@
-# app.py (本機執行版本)
+# app.py (本機執行版本 - 最終整合版)
 
 import os
 import re
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from flask import Flask, request, abort
 import logging
+import atexit
 
 # 官方 Line Bot SDK
 from linebot import LineBotApi, WebhookHandler
@@ -24,7 +25,7 @@ from dateutil.parser import parse
 import pytz
 
 # 從我們自訂的 db 模組匯入
-from db import init_db, get_db, Event, safe_db_operation, cleanup_db, DATABASE_URL # 匯入 DATABASE_URL
+from db import init_db, get_db, Event, safe_db_operation, cleanup_db, DATABASE_URL
 
 # ---------------------------------
 # 初始化設定
@@ -35,18 +36,17 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- 本機修改 START ---
-# 直接在此處設定你的憑證，而不是從環境變數讀取
-# !!! 請將 'YOUR_...' 替換成你自己的值 !!!
+# --- 本機設定 START ---
+# 直接在此處設定你的憑證
 LINE_CHANNEL_ACCESS_TOKEN = 'J450DanejGuyYScLjdWl8/MOzCJkJiGg3xyD9EnNSVv2YnbJhjsNctsZ7KLoZuYSHvD/SyMMj3qt/Rw+NEI6DsHk8n7qxJ4siyYKY3QxhrDnvJiuQqIN1AMcY5+oC4bRTeNOBPJTCLseJBE2pFmqugdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = '74df866d9f3f4c47f3d5e86d67fcb673'
-# --- 本機修改 END ---
+# --- 本機設定 END ---
 
 # 檢查必要變數
-if not LINE_CHANNEL_ACCESS_TOKEN or LINE_CHANNEL_ACCESS_TOKEN == 'YOUR_CHANNEL_ACCESS_TOKEN':
+if 'YOUR_CHANNEL_ACCESS_TOKEN' in LINE_CHANNEL_ACCESS_TOKEN:
     logger.error("LINE_CHANNEL_ACCESS_TOKEN is not set in app.py")
     exit(1)
-if not LINE_CHANNEL_SECRET or LINE_CHANNEL_SECRET == 'YOUR_CHANNEL_SECRET':
+if 'YOUR_CHANNEL_SECRET' in LINE_CHANNEL_SECRET:
     logger.error("LINE_CHANNEL_SECRET is not set in app.py")
     exit(1)
 
@@ -54,32 +54,16 @@ if not LINE_CHANNEL_SECRET or LINE_CHANNEL_SECRET == 'YOUR_CHANNEL_SECRET':
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 UTC_TZ = pytz.UTC
 
-
-jobstores = {
-    # 使用與主應用相同的資料庫
-    'default': SQLAlchemyJobStore(url=DATABASE_URL)
-}
-
-# 優化執行器設定
-executors = {
-    'default': ThreadPoolExecutor(max_workers=5) # 本機可以稍微增加
-}
-
-job_defaults = {
-    'coalesce': True,
-    'max_instances': 1,
-    'misfire_grace_time': 30
-}
-
-# 線程鎖
+# 排程器設定
+jobstores = {'default': SQLAlchemyJobStore(url=DATABASE_URL)}
+executors = {'default': ThreadPoolExecutor(max_workers=5)}
+job_defaults = {'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 30}
 scheduler_lock = threading.Lock()
-
-# 重要：排程器使用UTC時區
 scheduler = BackgroundScheduler(
     jobstores=jobstores,
     executors=executors,
     job_defaults=job_defaults,
-    timezone=UTC_TZ  # 使用UTC時區
+    timezone=UTC_TZ
 )
 
 # 安全啟動排程器
@@ -94,7 +78,7 @@ def safe_start_scheduler():
 
 # 初始化
 try:
-    init_db() # 這會建立 SQLite 資料庫檔案 (如果不存在)
+    init_db()
     safe_start_scheduler()
     logger.info("Application initialized successfully")
 except Exception as e:
@@ -105,23 +89,17 @@ except Exception as e:
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-
-# --- 接下來的程式碼與原版相同，此處省略以節省篇幅 ---
-# --- 您可以將原 `app.py` 中從第 91 行 `def add_event(...` 開始到檔案結尾的程式碼複製貼上到這裡 ---
-# --- 或者，為了方便，我將完整的程式碼附在下面 ---
-
 # ---------------------------------
 # 資料庫輔助函式
 # ---------------------------------
-def add_event(creator_id, target_id, display_name, content, event_dt):
-    """添加事件到資料庫"""
+def add_event(creator_id, target_id, target_type, display_name, content, event_dt):
     def _add_event():
-        db_gen = get_db()
-        db = next(db_gen)
+        db = next(get_db())
         try:
             new_event = Event(
                 creator_user_id=creator_id,
-                target_user_id=target_id,
+                target_id=target_id,
+                target_type=target_type,
                 target_display_name=display_name,
                 event_content=content,
                 event_datetime=event_dt
@@ -130,13 +108,8 @@ def add_event(creator_id, target_id, display_name, content, event_dt):
             db.commit()
             db.refresh(new_event)
             return new_event.id
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error adding event: {e}")
-            raise
         finally:
             db.close()
-
     try:
         return safe_db_operation(_add_event)
     except Exception as e:
@@ -144,10 +117,8 @@ def add_event(creator_id, target_id, display_name, content, event_dt):
         return None
 
 def update_reminder_time(event_id, reminder_dt):
-    """更新提醒時間"""
-    def _update_reminder():
-        db_gen = get_db()
-        db = next(db_gen)
+    def _update():
+        db = next(get_db())
         try:
             event = db.query(Event).filter(Event.id == event_id).first()
             if event:
@@ -155,40 +126,22 @@ def update_reminder_time(event_id, reminder_dt):
                 db.commit()
                 return True
             return False
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error updating reminder time: {e}")
-            raise
         finally:
             db.close()
-
-    try:
-        return safe_db_operation(_update_reminder)
-    except Exception as e:
-        logger.error(f"Failed to update reminder time: {e}")
-        return False
+    return safe_db_operation(_update)
 
 def get_event(event_id):
-    """獲取事件資料"""
-    def _get_event():
-        db_gen = get_db()
-        db = next(db_gen)
+    def _get():
+        db = next(get_db())
         try:
             return db.query(Event).filter(Event.id == event_id).first()
         finally:
             db.close()
-
-    try:
-        return safe_db_operation(_get_event)
-    except Exception as e:
-        logger.error(f"Failed to get event: {e}")
-        return None
+    return safe_db_operation(_get)
 
 def mark_reminder_sent(event_id):
-    """標記提醒已發送"""
-    def _mark_sent():
-        db_gen = get_db()
-        db = next(db_gen)
+    def _mark():
+        db = next(get_db())
         try:
             event = db.query(Event).filter(Event.id == event_id).first()
             if event:
@@ -196,24 +149,13 @@ def mark_reminder_sent(event_id):
                 db.commit()
                 return True
             return False
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error marking reminder as sent: {e}")
-            raise
         finally:
             db.close()
-
-    try:
-        return safe_db_operation(_mark_sent)
-    except Exception as e:
-        logger.error(f"Failed to mark reminder as sent: {e}")
-        return False
+    return safe_db_operation(_mark)
 
 def reset_reminder_sent_status(event_id):
-    """重置提醒發送狀態"""
-    def _reset_status():
-        db_gen = get_db()
-        db = next(db_gen)
+    def _reset():
+        db = next(get_db())
         try:
             event = db.query(Event).filter(Event.id == event_id).first()
             if event:
@@ -221,279 +163,180 @@ def reset_reminder_sent_status(event_id):
                 db.commit()
                 return True
             return False
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error resetting reminder status: {e}")
-            raise
         finally:
             db.close()
-
-    try:
-        return safe_db_operation(_reset_status)
-    except Exception as e:
-        logger.error(f"Failed to reset reminder status: {e}")
-        return False
+    return safe_db_operation(_reset)
 
 # ---------------------------------
 # 排程任務
 # ---------------------------------
 def send_reminder(event_id):
-    """發送提醒"""
     try:
         with app.app_context():
             logger.info(f"Executing reminder for event_id: {event_id}")
-            logger.info(f"Current UTC time: {datetime.now(UTC_TZ)}")
-            logger.info(f"Current Taipei time: {datetime.now(TAIPEI_TZ)}")
-            
             event = get_event(event_id)
             if not event or event.reminder_sent:
                 logger.warning(f"Skipping reminder for event_id {event_id}")
                 return
-            
-            target_id = event.target_user_id
+
+            destination_id = event.target_id
             display_name = event.target_display_name
-            
-            # 確保事件時間是台北時區
-            event_dt = event.event_datetime
-            if event_dt.tzinfo is None:
-                event_dt = TAIPEI_TZ.localize(event_dt)
-            else:
-                event_dt = event_dt.astimezone(TAIPEI_TZ)
-            
             event_content = event.event_content
-            
-            logger.info(f"Sending reminder to {target_id} for event at {event_dt}")
-            
-            # 建立確認模板
+            event_dt = event.event_datetime.astimezone(TAIPEI_TZ)
+
+            logger.info(f"Sending reminder to {event.target_type} ({destination_id}) for event at {event_dt}")
+
             confirm_template = ConfirmTemplate(
                 text=f"⏰ 提醒！\n\n@{display_name}\n記得在 {event_dt.strftime('%Y/%m/%d %H:%M')} 要「{event_content}」喔！",
                 actions=[
-                    PostbackTemplateAction(
-                        label="確認收到",
-                        data=f"action=confirm_reminder&id={event_id}"
-                    ),
-                    PostbackTemplateAction(
-                        label="延後5分鐘",
-                        data=f"action=snooze_reminder&id={event_id}&minutes=5"
-                    )
+                    PostbackTemplateAction(label="確認收到", data=f"action=confirm_reminder&id={event_id}"),
+                    PostbackTemplateAction(label="延後5分鐘", data=f"action=snooze_reminder&id={event_id}&minutes=5")
                 ]
             )
+            template_message = TemplateSendMessage(alt_text=f"提醒：{event_content}", template=confirm_template)
             
-            template_message = TemplateSendMessage(
-                alt_text=f"提醒：{event_content}",
-                template=confirm_template
-            )
-            
-            # 發送訊息
-            line_bot_api.push_message(target_id, template_message)
+            line_bot_api.push_message(destination_id, template_message)
             mark_reminder_sent(event_id)
             logger.info(f"Reminder sent successfully for event_id: {event_id}")
-            
     except Exception as e:
-        logger.error(f"Error in send_reminder for event_id {event_id}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"Error in send_reminder for event_id {event_id}: {e}", exc_info=True)
 
 # ---------------------------------
 # 安全的排程器操作
 # ---------------------------------
 def safe_add_job(func, run_date, args, job_id):
-    """安全地添加任務到排程器"""
     try:
         with scheduler_lock:
             if not scheduler.running:
                 safe_start_scheduler()
             
-            # 移除現有任務
-            try:
-                scheduler.remove_job(job_id)
-            except:
-                pass
+            run_date_utc = run_date.astimezone(UTC_TZ)
             
-            # 確保使用UTC時間給排程器
-            if run_date.tzinfo is None:
-                run_date_utc = UTC_TZ.localize(run_date)
-            else:
-                run_date_utc = run_date.astimezone(UTC_TZ)
+            scheduler.add_job(func, 'date', run_date=run_date_utc, args=args, id=job_id, replace_existing=True)
             
-            # 添加新任務
-            scheduler.add_job(
-                func,
-                'date',
-                run_date=run_date_utc,
-                args=args,
-                id=job_id,
-                replace_existing=True
-            )
-            
-            # 日誌顯示兩種時間格式
             taipei_time = run_date_utc.astimezone(TAIPEI_TZ)
-            logger.info(f"Successfully scheduled job: {job_id}")
-            logger.info(f"  UTC time: {run_date_utc}")
-            logger.info(f"  Taipei time: {taipei_time}")
-            
+            logger.info(f"Successfully scheduled job: {job_id} at {taipei_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
             return True
     except Exception as e:
-        logger.error(f"Error scheduling job {job_id}: {e}")
+        logger.error(f"Error scheduling job {job_id}: {e}", exc_info=True)
         return False
 
 # ---------------------------------
 # 時間解析輔助函式
 # ---------------------------------
 def parse_datetime(datetime_str):
-    """解析各種時間格式"""
     try:
-        formats = [
-            '%Y/%m/%d %H:%M',
-            '%Y-%m-%d %H:%M',
-            '%m/%d %H:%M',
-            '%m-%d %H:%M',
-            '%Y/%m/%d',
-            '%Y-%m-%d',
-            '%m/%d',
-            '%m-%d'
-        ]
-        
-        for fmt in formats:
-            try:
-                dt = datetime.strptime(datetime_str, fmt)
-                if dt.year == 1900:
-                    dt = dt.replace(year=datetime.now().year)
-                if dt.hour == 0 and dt.minute == 0 and '%H:%M' not in fmt:
-                    now = datetime.now()
-                    dt = dt.replace(hour=now.hour, minute=now.minute)
-                return dt
-            except ValueError:
-                continue
-        
+        # 嘗試標準格式
         return parse(datetime_str, yearfirst=False)
-    except Exception as e:
-        logger.error(f"Error parsing datetime '{datetime_str}': {e}")
-        return None
+    except Exception:
+        # 自訂格式解析 (處理 m/d 或 Y/m/d 的簡寫)
+        now = datetime.now(TAIPEI_TZ)
+        parts = datetime_str.replace('/', '-').split()
+        date_part = parts[0]
+        time_part = parts[1] if len(parts) > 1 else f"{now.hour}:{now.minute}"
+        
+        try:
+            if date_part.count('-') == 1: # m-d
+                date_part = f"{now.year}-{date_part}"
+            
+            full_dt_str = f"{date_part} {time_part}"
+            return datetime.strptime(full_dt_str, '%Y-%m-%d %H:%M')
+        except Exception as e:
+            logger.error(f"Error parsing datetime '{datetime_str}': {e}")
+            return None
 
 # ---------------------------------
 # Webhook 路由
 # ---------------------------------
 @app.route("/callback", methods=['POST'])
 def callback():
-    """處理 LINE Webhook 回調"""
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
     try:
-        signature = request.headers.get('X-Line-Signature')
-        if not signature:
-            logger.error("No signature found")
-            abort(400)
-            
-        body = request.get_data(as_text=True)
         handler.handle(body, signature)
-        return 'OK'
-        
     except InvalidSignatureError:
-        logger.error("Invalid signature")
         abort(400)
     except Exception as e:
-        logger.error(f"Error in callback: {e}")
+        logger.error(f"Error in callback handler: {e}", exc_info=True)
         abort(500)
+    return 'OK'
 
 # ---------------------------------
 # 核心訊息處理邏輯
 # ---------------------------------
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    """處理文字訊息"""
     try:
         text = event.message.text.strip()
         creator_user_id = event.source.user_id
-        
-        # 提供使用說明
-        if text.startswith('提醒') and not re.match(r'^提醒\s+(\S+)\s+([\d/\-\s:]+|明天|後天)\s*(\d{1,2}:\d{2})?\s+(.+)$', text):
-            help_text = """請使用以下格式：
+
+        source = event.source
+        source_type = source.type
+        if source_type == 'user':
+            destination_id = source.user_id
+        elif source_type == 'group':
+            destination_id = source.group_id
+        elif source_type == 'room':
+            destination_id = source.room_id
+        else:
+            return
+
+        # 檢查是否為提醒指令
+        match = re.match(r'^提醒\s+(\S+)\s+([\d/\-\s:]+|明天|後天)\s*(\d{1,2}:\d{2})?\s+(.+)$', text)
+        if not match:
+            if text.lower() in ['help', '說明', '幫助']:
+                 help_text = """請使用以下格式：
 提醒 我 2025/07/15 17:20 做某事
-提醒 我 7/15 17:20 做某事
+提醒 @某人 7/15 17:20 做某事 (群組內)
 提醒 我 明天 17:20 做某事
 
 支援的時間格式：
-- 年/月/日 時:分
-- 月/日 時:分
-- 明天 時:分
-- 後天 時:分"""
-            
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=help_text)
-            )
+- YYYY/MM/DD HH:MM
+- MM/DD HH:MM
+- 明天 HH:MM
+- 後天 HH:MM
+"""
+                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=help_text))
             return
 
-        # 解析提醒指令
-        match = re.match(r'^提醒\s+(\S+)\s+([\d/\-\s:]+|明天|後天)\s*(\d{1,2}:\d{2})?\s+(.+)$', text)
-        if not match:
-            return
+        who_to_remind_text, date_str, time_str, content = match.groups()
+        content = content.strip()
 
-        who_to_remind_text = match.group(1)
-        date_str = match.group(2)
-        time_str = match.group(3)
-        content = match.group(4).strip()
-
-        # 處理特殊日期
+        now_in_taipei = datetime.now(TAIPEI_TZ)
         if date_str == '明天':
-            tomorrow = datetime.now(TAIPEI_TZ) + timedelta(days=1)
-            date_str = tomorrow.strftime('%Y/%m/%d')
+            dt = now_in_taipei + timedelta(days=1)
         elif date_str == '後天':
-            day_after_tomorrow = datetime.now(TAIPEI_TZ) + timedelta(days=2)
-            date_str = day_after_tomorrow.strftime('%Y/%m/%d')
-        
-        # 組合日期和時間
-        datetime_str = f"{date_str} {time_str}" if time_str else date_str
+            dt = now_in_taipei + timedelta(days=2)
+        else:
+            dt = now_in_taipei
 
-        # 判斷提醒對象
+        datetime_str = f"{date_str.replace('明天', dt.strftime('%Y/%m/%d')).replace('後天', dt.strftime('%Y/%m/%d'))} {time_str if time_str else ''}".strip()
+        
+        naive_dt = parse_datetime(datetime_str)
+        if not naive_dt:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 時間格式有誤，請檢查後重新輸入。"))
+            return
+        
+        event_dt = TAIPEI_TZ.localize(naive_dt)
+
+        if event_dt <= datetime.now(TAIPEI_TZ):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 提醒時間不能設定在過去喔！"))
+            return
+
         if who_to_remind_text == '我':
             try:
                 profile = line_bot_api.get_profile(creator_user_id)
-                target_user_id = creator_user_id
                 target_display_name = profile.display_name
             except LineBotApiError:
-                target_user_id = creator_user_id
                 target_display_name = "您"
         else:
-            target_user_id = creator_user_id
             target_display_name = who_to_remind_text
 
-        # 解析時間
-        naive_dt = parse_datetime(datetime_str)
-        if not naive_dt:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="❌ 時間格式有誤，請檢查後重新輸入。")
-            )
-            return
-        
-        # 設定時區 - 強制轉換為台北時區
-        if naive_dt.tzinfo is None:
-            event_dt = TAIPEI_TZ.localize(naive_dt)
-        else:
-            event_dt = naive_dt.astimezone(TAIPEI_TZ)
-        
-        # 檢查時間是否在過去
-        current_time = datetime.now(TAIPEI_TZ)
-        logger.info(f"Event time: {event_dt}, Current time: {current_time}")
-        
-        if event_dt <= current_time:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="⚠️ 提醒時間不能設定在過去喔！請重新設定。")
-            )
-            return
-
-        # 儲存事件
-        event_id = add_event(creator_user_id, target_user_id, target_display_name, content, event_dt)
-        
+        event_id = add_event(creator_user_id, destination_id, source_type, target_display_name, content, event_dt)
         if not event_id:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="❌ 建立提醒失敗，請稍後再試。")
-            )
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 建立提醒失敗，請稍後再試。"))
             return
         
-        # 建立快捷回覆
         quick_reply_buttons = QuickReply(items=[
             QuickReplyButton(action=PostbackAction(label="10分鐘前", data=f"action=set_reminder&id={event_id}&type=minute&val=10")),
             QuickReplyButton(action=PostbackAction(label="30分鐘前", data=f"action=set_reminder&id={event_id}&type=minute&val=30")),
@@ -502,21 +345,12 @@ def handle_message(event):
         ])
 
         reply_text = f"✅ 已記錄：{target_display_name} {event_dt.strftime('%Y/%m/%d %H:%M')} {content}\n\n希望什麼時候提醒您呢？"
-        
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=reply_text, quick_reply=quick_reply_buttons)
-        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply_buttons))
         
     except Exception as e:
-        logger.error(f"Error in handle_message: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"Error in handle_message: {e}", exc_info=True)
         try:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="❌ 處理請求時發生錯誤，請稍後再試。")
-            )
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 處理請求時發生錯誤，請稍後再試。"))
         except:
             pass
 
@@ -525,173 +359,98 @@ def handle_message(event):
 # ---------------------------------
 @handler.add(PostbackEvent)
 def handle_postback(event):
-    """處理 Postback 事件"""
     try:
         data = dict(x.split('=') for x in event.postback.data.split('&'))
         action = data.get('action')
         
         if action == 'set_reminder':
-            event_id = int(data.get('id'))
-            reminder_type = data.get('type')
+            event_id = int(data['id'])
+            reminder_type = data['type']
             
             event_record = get_event(event_id)
             if not event_record:
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text="❌ 找不到該提醒事件。")
-                )
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 找不到該提醒事件。"))
                 return
 
-            # 確保事件時間是台北時區
-            event_dt = event_record.event_datetime
-            if event_dt.tzinfo is None:
-                event_dt = TAIPEI_TZ.localize(event_dt)
-            else:
-                event_dt = event_dt.astimezone(TAIPEI_TZ)
-            
+            event_dt = event_record.event_datetime.astimezone(TAIPEI_TZ)
             reminder_dt = None
             
             if reminder_type == 'none':
                 reply_msg_text = "✅ 好的，這個事件將不設定提醒。"
             else:
-                value = int(data.get('val'))
-                delta = timedelta()
-                
-                if reminder_type == 'day':
-                    delta = timedelta(days=value)
-                elif reminder_type == 'hour':
-                    delta = timedelta(hours=value)
-                elif reminder_type == 'minute':
-                    delta = timedelta(minutes=value)
+                value = int(data.get('val', 0))
+                delta = timedelta(days=value if reminder_type == 'day' else 0,
+                                  hours=value if reminder_type == 'hour' else 0,
+                                  minutes=value if reminder_type == 'minute' else 0)
                 
                 if delta:
-                    # 計算提醒時間（台北時區）
                     reminder_dt = event_dt - delta
-                    
-                    # 檢查提醒時間是否在過去
-                    current_time = datetime.now(TAIPEI_TZ)
-                    logger.info(f"Current time: {current_time}")
-                    logger.info(f"Reminder time: {reminder_dt}")
-                    
-                    if reminder_dt <= current_time:
-                        line_bot_api.reply_message(
-                            event.reply_token,
-                            TextSendMessage(text="⚠️ 提醒時間已過，無法設定提醒。")
-                        )
+                    if reminder_dt <= datetime.now(TAIPEI_TZ):
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 提醒時間已過，無法設定。"))
                         return
                     
-                    logger.info(f"Scheduling reminder:")
-                    logger.info(f"  Event time (Taipei): {event_dt}")
-                    logger.info(f"  Reminder time (Taipei): {reminder_dt}")
-                    
-                    # 安全地添加任務 - 會自動轉換為UTC
-                    success = safe_add_job(
-                        send_reminder,
-                        reminder_dt,  # 傳入台北時間，函式內會轉換為UTC
-                        [event_id],
-                        f'reminder_{event_id}'
-                    )
-                    
-                    if success:
+                    if safe_add_job(send_reminder, reminder_dt, [event_id], f'reminder_{event_id}'):
                         reply_msg_text = f"✅ 設定完成！將於 {reminder_dt.strftime('%Y/%m/%d %H:%M')} 提醒您。"
                     else:
                         reply_msg_text = "❌ 設定提醒時發生錯誤。"
                 else:
-                    reply_msg_text = "❌ 設定提醒時發生未知的錯誤。"
+                    reply_msg_text = "❌ 未知的提醒類型。"
             
-            # 更新資料庫 - 儲存台北時間
             if update_reminder_time(event_id, reminder_dt):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_msg_text))
             else:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新提醒時間失敗。"))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新資料庫失敗。"))
         
         elif action == 'confirm_reminder':
-            event_id = int(data.get('id'))
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="✅ 提醒已確認收到！")
-            )
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 提醒已確認收到！"))
             
         elif action == 'snooze_reminder':
-            event_id = int(data.get('id'))
+            event_id = int(data['id'])
             minutes = int(data.get('minutes', 5))
-            
-            if not reset_reminder_sent_status(event_id):
-                logger.error(f"Failed to reset reminder status for snooze, event_id: {event_id}")
-            
-            # 重新排程提醒
+            reset_reminder_sent_status(event_id)
             snooze_time = datetime.now(TAIPEI_TZ) + timedelta(minutes=minutes)
-            
-            success = safe_add_job(
-                send_reminder,
-                snooze_time,
-                [event_id],
-                f'reminder_{event_id}'
-            )
-            
-            if success:
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text=f"⏰ 好的，{minutes}分鐘後再次提醒您！")
-                )
+            if safe_add_job(send_reminder, snooze_time, [event_id], f'reminder_{event_id}'):
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⏰ 好的，{minutes}分鐘後再次提醒您！"))
             else:
-                line_bot_api.reply_message(
-                    event.reply_token,
-                    TextSendMessage(text="❌ 延後提醒設定失敗。")
-                )
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 延後提醒設定失敗。"))
                 
     except Exception as e:
-        logger.error(f"Error in handle_postback: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"Error in handle_postback: {e}", exc_info=True)
         try:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="❌ 處理請求時發生錯誤。")
-            )
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 處理 Postback 時發生錯誤。"))
         except:
             pass
 
 # ---------------------------------
-# 健康檢查端點
+# 健康檢查與根路由
 # ---------------------------------
-@app.route("/health", methods=['GET'])
+@app.route("/health")
 def health_check():
-    """健康檢查端點"""
     return {
         "status": "healthy", 
         "scheduler_running": scheduler.running,
         "scheduled_jobs": len(scheduler.get_jobs()) if scheduler.running else 0,
-        "current_utc_time": datetime.now(UTC_TZ).isoformat(),
         "current_taipei_time": datetime.now(TAIPEI_TZ).isoformat()
     }
 
-@app.route("/", methods=['GET'])
+@app.route("/")
 def index():
-    """根路由"""
     return "LINE Bot Reminder Service is running!"
 
 # ---------------------------------
 # 清理函式
 # ---------------------------------
 def cleanup():
-    """應用程式關閉時的清理工作"""
-    try:
-        if scheduler.running:
-            scheduler.shutdown()
-            logger.info("Scheduler shut down successfully")
-        cleanup_db()
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}")
+    if scheduler.running:
+        scheduler.shutdown()
+        logger.info("Scheduler shut down successfully")
+    cleanup_db()
 
-# 註冊清理函式
-import atexit
 atexit.register(cleanup)
 
 # ---------------------------------
-# 主程式進入點 (本機執行版本)
+# 主程式進入點
 # ---------------------------------
 if __name__ == "__main__":
-    port = 5000 # 固定使用 5000 port，方便 ngrok 設定
-    # debug=True 可以在修改程式碼後自動重啟，並提供更詳細的錯誤訊息
-    app.run(host='127.0.0.1', port=port, debug=True)
+    # 為了讓 ngrok 能穩定連接，監聽在 0.0.0.0
+    app.run(host='0.0.0.0', port=5000, debug=True)

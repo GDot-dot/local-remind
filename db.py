@@ -1,17 +1,14 @@
-# db.py (本機 SQLite 版本)
+# db.py (更新版本 - 支援群組提醒)
 import os
 import time
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, DateTime
 
-# --- 本機修改 START ---
-# 使用 SQLite 資料庫，它會在本機建立一個名為 reminders.db 的檔案
+# 使用 SQLite 資料庫
 DATABASE_URL = "sqlite:///./reminders.db"
-# --- 本機修改 END ---
 
 # 建立資料庫引擎
-# connect_args 是 SQLite 在多線程環境下安全執行所必需的
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False}
@@ -26,7 +23,12 @@ class Event(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     creator_user_id = Column(String, nullable=False)
-    target_user_id = Column(String, nullable=False)
+    
+    # --- 這就是需要修正的地方 ---
+    target_id = Column(String, nullable=False)      # 提醒的目標 ID (可能是 user_id, group_id, or room_id)
+    target_type = Column(String, nullable=False)    # 提醒的目標類型 ('user', 'group', or 'room')
+    # --- 修正結束 ---
+
     target_display_name = Column(Text, nullable=False)
     event_content = Column(Text, nullable=False)
     event_datetime = Column(DateTime(timezone=True), nullable=False)
@@ -34,7 +36,7 @@ class Event(Base):
     reminder_sent = Column(Integer, default=0)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
 
-# 提供一個安全的資料庫 session 函式
+# --- 以下程式碼與之前版本相同，無需修改 ---
 def get_db():
     db = SessionLocal()
     try:
@@ -46,9 +48,7 @@ def get_db():
     finally:
         db.close()
 
-# 安全的資料庫操作函式
 def safe_db_operation(operation, max_retries=3):
-    """執行資料庫操作，包含重試機制"""
     for attempt in range(max_retries):
         try:
             return operation()
@@ -57,9 +57,8 @@ def safe_db_operation(operation, max_retries=3):
             if attempt == max_retries - 1:
                 raise
             time.sleep(1)
-    return None # 加上這行避免 mypy 警告
+    return None
 
-# 初始化資料庫表格的函式
 def init_db():
     def _init():
         Base.metadata.create_all(bind=engine)
@@ -71,9 +70,7 @@ def init_db():
         print(f"Error creating database tables: {e}")
         raise
 
-# 清理資料庫連線的函式
 def cleanup_db():
-    """清理資料庫連線池"""
     try:
         engine.dispose()
         print("Database connections cleaned up.")
