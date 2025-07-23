@@ -325,11 +325,22 @@ def handle_message(event):
 
         if who_to_remind_text == '我':
             try:
-                profile = line_bot_api.get_profile(creator_user_id)
-                target_display_name = profile.display_name
-            except LineBotApiError:
+                # 根據來源類型 (群組/聊天室/個人) 使用不同的 API 來獲取使用者名稱
+                if source_type == 'group':
+                    profile = line_bot_api.get_group_member_profile(event.source.group_id, creator_user_id)
+                    target_display_name = profile.display_name
+                elif source_type == 'room':
+                    profile = line_bot_api.get_room_member_profile(event.source.room_id, creator_user_id)
+                    target_display_name = profile.display_name
+                else: # source_type == 'user'
+                    profile = line_bot_api.get_profile(creator_user_id)
+                    target_display_name = profile.display_name
+            except LineBotApiError as e:
+                # 如果 API 調用失敗 (例如在群組中，使用者未加機器人好友，或機器人權限不足)，則使用備用名稱
+                logger.warning(f"無法獲取使用者 {creator_user_id} 的個人資料於 {source_type}。錯誤: {e}")
                 target_display_name = "您"
         else:
+            # 如果是指定 @某人 或其他文字，直接使用該文字
             target_display_name = who_to_remind_text
 
         event_id = add_event(creator_user_id, destination_id, source_type, target_display_name, content, event_dt)
