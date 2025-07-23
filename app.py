@@ -281,21 +281,13 @@ def handle_message(event):
         else:
             return
 
-        # 檢查是否為提醒指令
-        match = re.match(r'^提醒\s+(\S+)\s+([\d/\-\s:]+|明天|後天)\s*(\d{1,2}:\d{2})?\s+(.+)$', text)
+        # 新增：去除所有空格以支援無空格輸入
+        text_no_space = text.replace(' ', '')
+        # 新正則：支援無空格格式，且『誰』只吃到第一個日期前的內容
+        match = re.match(r'^提醒(@?[^0-9明後]+)([0-9]{1,4}/[0-9]{1,2}/[0-9]{1,2}|[0-9]{1,2}/[0-9]{1,2}|明天|後天)([0-9]{1,2}:[0-9]{2})?(.+)$', text_no_space)
         if not match:
             if text.lower() in ['help', '說明', '幫助']:
-                 help_text = """請使用以下格式：
-提醒 我 2025/07/15 17:20 做某事
-提醒 @某人 7/15 17:20 做某事 (群組內)
-提醒 我 明天 17:20 做某事
-
-支援的時間格式：
-- YYYY/MM/DD HH:MM
-- MM/DD HH:MM
-- 明天 HH:MM
-- 後天 HH:MM
-"""
+                 help_text = """請使用以下格式：\n提醒 我 2025/07/15 17:20 做某事\n提醒 @某人 7/15 17:20 做某事 (群組內)\n提醒 我 明天 17:20 做某事\n\n支援的時間格式：\n- YYYY/MM/DD HH:MM\n- MM/DD HH:MM\n- 明天 HH:MM\n- 後天 HH:MM\n"""
                  line_bot_api.reply_message(event.reply_token, TextSendMessage(text=help_text))
             return
 
