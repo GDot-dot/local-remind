@@ -6,7 +6,7 @@ import time
 import atexit
 import subprocess
 from pyngrok import ngrok
-# 引用新版 v3 SDK 的 MessagingApi
+from pyngrok.conf import PyngrokConfig
 from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
@@ -20,6 +20,11 @@ LINE_CHANNEL_ACCESS_TOKEN = 'J450DanejGuyYScLjdWl8/MOzCJkJiGg3xyD9EnNSVv2YnbJhjs
 
 # 2. 從 ngrok Dashboard (Domains 頁面) 取得你的靜態網域
 NGROK_STATIC_DOMAIN = 'krill-strong-conversely.ngrok-free.app' # 例如: 'lion-organic-severely.ngrok-free.app'
+
+# 3. 指定你的 ngrok 設定檔路徑
+#    使用 r"..." 可以避免 Windows 路徑中的反斜線問題
+NGROK_CONFIG_PATH = r"C:\Users\user\AppData\Local\ngrok\ngrok_remind.yml"
+
 # ----------------------------------------------------
 
 # 檢查設定是否已填寫
@@ -56,10 +61,15 @@ print("Flask 啟動成功！等待幾秒鐘讓服務穩定...")
 time.sleep(3) # 給 Flask 一點時間啟動
 
 try:
+    print(f"將使用設定檔: {NGROK_CONFIG_PATH}")
+    # 建立一個 PyngrokConfig 物件，並指向你的 .yml 檔案
+    pyngrok_config = PyngrokConfig(config_path=NGROK_CONFIG_PATH)
+        
     print(f"正在透過靜態網域 '{NGROK_STATIC_DOMAIN}' 建立 ngrok 通道...")
     # 啟動 ngrok，並指定靜態網域
-    ngrok_tunnel = ngrok.connect(5000, "http", domain=NGROK_STATIC_DOMAIN)
+    ngrok_tunnel = ngrok.connect(5000, "http", domain=NGROK_STATIC_DOMAIN,pyngrok_config=pyngrok_config)
     
+
     # 組合完整的 webhook URL
     webhook_url = f"{ngrok_tunnel.public_url}/callback"
     print(f"ngrok 通道建立成功！公開網址為: {webhook_url}")
