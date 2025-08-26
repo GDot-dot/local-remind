@@ -282,9 +282,9 @@ def handle_message(event):
             return
 
         # 新增：去除所有空格以支援無空格輸入
-        text_no_space = text.replace(' ', '')
+       # text_no_space = text.replace(' ', '')
         # 新正則：支援無空格格式，且『誰』只吃到第一個日期前的內容
-        match = re.match(r'^提醒(@?[^0-9明後]+)([0-9]{1,4}/[0-9]{1,2}/[0-9]{1,2}|[0-9]{1,2}/[0-9]{1,2}|明天|後天)([0-9]{1,2}:[0-9]{2})?(.+)$', text_no_space)
+        match = re.match(r'^提醒\s*(@?[^\s]+)\s+([0-9]{1,4}/[0-9]{1,2}/[0-9]{1,2}|[0-9]{1,2}/[0-9]{1,2}|今天|明天|後天)(?:\s+([0-9]{1,2}:[0-9]{2}))?\s*(.+)$', text)
         if not match:
             if text.lower() in ['help', '說明', '幫助']:
                  help_text = """請使用以下格式：\n提醒 我 2025/07/15 17:20 做某事\n提醒 @某人 7/15 17:20 做某事 (群組內)\n提醒 我 明天 17:20 做某事\n\n支援的時間格式：\n- YYYY/MM/DD HH:MM\n- MM/DD HH:MM\n- 明天 HH:MM\n- 後天 HH:MM\n"""
@@ -295,14 +295,16 @@ def handle_message(event):
         content = content.strip()
 
         now_in_taipei = datetime.now(TAIPEI_TZ)
-        if date_str == '明天':
+        if date_str == '今天':
+            dt = now_in_taipei + timedelta(days=0)
+        elif date_str == '明天':
             dt = now_in_taipei + timedelta(days=1)
         elif date_str == '後天':
             dt = now_in_taipei + timedelta(days=2)
         else:
             dt = now_in_taipei
 
-        datetime_str = f"{date_str.replace('明天', dt.strftime('%Y/%m/%d')).replace('後天', dt.strftime('%Y/%m/%d'))} {time_str if time_str else ''}".strip()
+        datetime_str = f"{date_str.replace('今天', dt.strftime('%Y/%m/%d')).replace('明天', dt.strftime('%Y/%m/%d')).replace('後天', dt.strftime('%Y/%m/%d'))} {time_str if time_str else ''}".strip()
         
         naive_dt = parse_datetime(datetime_str)
         if not naive_dt:
