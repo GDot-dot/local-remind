@@ -16,7 +16,7 @@ from linebot.v3.messaging import (
 
 # --- 請在此處填寫你的設定 ---
 # 1. LINE Bot 憑證 (與 app.py 相同)
-LINE_CHANNEL_ACCESS_TOKEN = 'J450DanejGuyYScLjdWl8/MOzCJkJiGg3xyD9EnNSVv2YnbJhjsNctsZ7KLoZuYSHvD/SyMMj3qt/Rw+NEI6DsHk8n7qxJ4siyYKY3QxhrDnvJiuQqIN1AMcY5+oC4bRTeNOBPJTCLseJBE2pFmqugdB04t89/1O/w1cDnyilFU='
+LINE_CHANNEL_ACCESS_TOKEN = '0jtuGMTolXKvvsQmb3CcAoD9JdkADsDKe+xsICSU9xmIcdyHmAFCTPY3H04nI1DeHvD/SyMMj3qt/Rw+NEI6DsHk8n7qxJ4siyYKY3QxhrBWb9QAkPDDLsVCs6Xny+t+6QEVFvx3hVDUTWTe7AxdtQdB04t89/1O/w1cDnyilFU='
 
 # 2. 從 ngrok Dashboard (Domains 頁面) 取得你的靜態網域
 NGROK_STATIC_DOMAIN = 'krill-strong-conversely.ngrok-free.app' # 例如: 'lion-organic-severely.ngrok-free.app'
