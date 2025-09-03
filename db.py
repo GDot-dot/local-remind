@@ -1,4 +1,4 @@
-# db.py (最終、最完整的版本)
+# db.py (整合海纜監控功能的最終完整版)
 
 import os
 import time
@@ -49,6 +49,21 @@ class Location(Base):
 
     def __repr__(self):
         return f"<Location(name='{self.name}', user_id='{self.user_id}')>"
+
+class CableState(Base):
+    """只儲存一行記錄，用來追蹤海纜事件的最後狀態"""
+    __tablename__ = 'cable_state'
+    id = Column(Integer, primary_key=True)
+    last_event_titles = Column(Text, nullable=True)
+    last_checked = Column(DateTime, default=datetime.utcnow)
+
+class CableSubscriber(Base):
+    """儲存所有訂閱了海纜通知的使用者或群組"""
+    __tablename__ = 'cable_subscribers'
+    id = Column(Integer, primary_key=True)
+    subscriber_id = Column(String, nullable=False, unique=True)
+    subscriber_type = Column(String, nullable=False)
+    subscribed_at = Column(DateTime, default=datetime.utcnow)
 
 # ---------------------------------
 # 核心資料庫函式
@@ -204,3 +219,72 @@ def reset_reminder_sent_status(event_id):
         finally:
             db.close()
     return safe_db_operation(_reset)
+
+# ---------------------------------
+# 海纜監控相關的資料庫函式
+# ---------------------------------
+def get_last_cable_state():
+    def _get():
+        db = next(get_db())
+        try:
+            state = db.query(CableState).filter_by(id=1).first()
+            if not state:
+                new_state = CableState(id=1, last_event_titles="")
+                db.add(new_state)
+                db.commit()
+                db.refresh(new_state)
+            return state
+        finally:
+            db.close()
+    return safe_db_operation(_get)
+
+def update_last_cable_state(new_titles_str):
+    def _update():
+        db = next(get_db())
+        try:
+            state = db.query(CableState).filter_by(id=1).first()
+            if state:
+                state.last_event_titles = new_titles_str
+                state.last_checked = datetime.utcnow()
+                db.commit()
+            return True
+        finally:
+            db.close()
+    return safe_db_operation(_update)
+
+def add_cable_subscriber(sub_id, sub_type):
+    def _add():
+        db = next(get_db())
+        try:
+            existing = db.query(CableSubscriber).filter_by(subscriber_id=sub_id).first()
+            if existing: return "already_subscribed"
+            new_sub = CableSubscriber(subscriber_id=sub_id, subscriber_type=sub_type)
+            db.add(new_sub)
+            db.commit()
+            return "success"
+        finally:
+            db.close()
+    return safe_db_operation(_add)
+
+def remove_cable_subscriber(sub_id):
+    def _remove():
+        db = next(get_db())
+        try:
+            sub_to_delete = db.query(CableSubscriber).filter_by(subscriber_id=sub_id).first()
+            if sub_to_delete:
+                db.delete(sub_to_delete)
+                db.commit()
+                return "success"
+            return "not_found"
+        finally:
+            db.close()
+    return safe_db_operation(_remove)
+
+def get_all_cable_subscribers():
+    def _get_all():
+        db = next(get_db())
+        try:
+            return db.query(CableSubscriber).all()
+        finally:
+            db.close()
+    return safe_db_operation(_get_all)
