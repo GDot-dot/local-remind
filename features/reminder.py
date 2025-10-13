@@ -1,4 +1,4 @@
-# features/reminder.py
+# features/reminder.py (修正版)
 
 import re
 from datetime import datetime, timedelta
@@ -6,6 +6,7 @@ from linebot.exceptions import LineBotApiError
 from linebot.models import (
     TextSendMessage, QuickReply, QuickReplyButton, PostbackAction
 )
+# 確保從 db 匯入的是最新的 add_event
 from db import add_event, get_event, update_reminder_time, reset_reminder_sent_status
 
 # 輔助函式
@@ -32,7 +33,7 @@ def handle_reminder_command(event, line_bot_api, TAIPEI_TZ):
         creator_user_id = event.source.user_id
         source = event.source
         source_type = source.type
-        destination_id = getattr(source, f'{source_type}_id', None)
+        destination_id = getattr(source, f'{source.type}_id', None)
         if not destination_id: return
 
         match = re.match(r'^提醒\s*(@?[^\s]+)\s+([0-9]{1,4}/[0-9]{1,2}/[0-9]{1,2}|[0-9]{1,2}/[0-9]{1,2}|今天|明天|後天)\s*([0-9]{1,2}:[0-9]{2})?\s*(.+)$', text)
@@ -72,7 +73,19 @@ def handle_reminder_command(event, line_bot_api, TAIPEI_TZ):
             except LineBotApiError:
                 target_display_name = "您"
 
-        event_id = add_event(creator_user_id, destination_id, source_type, target_display_name, content, event_dt)
+        # --- 這裡是修正的核心 ---
+        event_id = add_event(
+            creator_user_id=creator_user_id,
+            target_id=destination_id,
+            target_type=source_type,
+            display_name=target_display_name,
+            content=content,
+            event_datetime=event_dt,
+            is_recurring=0,  # 明確告知這不是週期性提醒
+            recurrence_rule=None,
+            next_run_time=None
+        )
+
         if not event_id:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 建立提醒失敗，請稍後再試。"))
             return

@@ -1,4 +1,4 @@
-# db.py (整合海纜監控功能的最終完整版)
+# db.py (整合週期性提醒功能)
 
 import os
 import time
@@ -29,11 +29,16 @@ class Event(Base):
     target_type = Column(String, nullable=False)
     target_display_name = Column(Text, nullable=False)
     event_content = Column(Text, nullable=False)
-    event_datetime = Column(DateTime(timezone=True), nullable=False)
+    event_datetime = Column(DateTime(timezone=True), nullable=True) # 改為可為空，以支援週期提醒
     reminder_time = Column(DateTime(timezone=True), nullable=True)
     reminder_sent = Column(Integer, default=0)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
     
+    # --- 新增的週期性欄位 ---
+    is_recurring = Column(Integer, default=0, nullable=False) # 0=非週期, 1=週期性
+    recurrence_rule = Column(String, nullable=True) # 例如 "MON,WED,FRI|08:30"
+    next_run_time = Column(DateTime(timezone=True), nullable=True, index=True) # 由 APScheduler 管理
+
     def __repr__(self):
         return f"<Event(id={self.id}, content='{self.event_content}')>"
 
@@ -51,14 +56,12 @@ class Location(Base):
         return f"<Location(name='{self.name}', user_id='{self.user_id}')>"
 
 class CableState(Base):
-    """只儲存一行記錄，用來追蹤海纜事件的最後狀態"""
     __tablename__ = 'cable_state'
     id = Column(Integer, primary_key=True)
     last_event_titles = Column(Text, nullable=True)
     last_checked = Column(DateTime, default=datetime.utcnow)
 
 class CableSubscriber(Base):
-    """儲存所有訂閱了海纜通知的使用者或群組"""
     __tablename__ = 'cable_subscribers'
     id = Column(Integer, primary_key=True)
     subscriber_id = Column(String, nullable=False, unique=True)
@@ -155,12 +158,21 @@ def delete_location_by_name(user_id, name):
 # 提醒功能相關的資料庫函式
 # ---------------------------------
 
-def add_event(creator_id, target_id, target_type, display_name, content, event_dt):
+def add_event(creator_user_id, target_id, target_type, display_name, content, event_datetime, is_recurring=0, recurrence_rule=None, next_run_time=None):
     def _add_event():
         db = next(get_db())
         try:
-            new_event = Event(creator_user_id=creator_id, target_id=target_id, target_type=target_type,
-                              target_display_name=display_name, event_content=content, event_datetime=event_dt)
+            new_event = Event(
+                creator_user_id=creator_user_id,
+                target_id=target_id,
+                target_type=target_type,
+                target_display_name=display_name,
+                event_content=content,
+                event_datetime=event_datetime,
+                is_recurring=is_recurring,
+                recurrence_rule=recurrence_rule,
+                next_run_time=next_run_time
+            )
             db.add(new_event)
             db.commit()
             db.refresh(new_event)

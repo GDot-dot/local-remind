@@ -1,4 +1,4 @@
-# app.py (整合海纜自動通知功能 - 最終完整版)
+# app.py (整合視覺化週期提醒功能)
 
 import os
 import threading
@@ -12,21 +12,17 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, PostbackEvent,
-    LocationMessage, ConfirmTemplate, PostbackTemplateAction, TemplateSendMessage
+    LocationMessage, ConfirmTemplate, PostbackTemplateAction, TemplateSendMessage,
+    FlexSendMessage
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor
 import pytz
 
-# 从 db.py 汇入所有函式
 from db import *
-# 从 features 模组汇入
-from features import reminder, location, scraper
+from features import reminder, location, scraper, recurring_reminder
 
-# ---------------------------------
-# 初始化設定
-# ---------------------------------
 app = Flask(__name__)
 user_states = {}
 logging.basicConfig(level=logging.INFO)
@@ -37,10 +33,8 @@ cache_timestamp = None
 scraper_lock = threading.Lock()
 CACHE_DURATION_MINUTES = 5
 
-# --- 本機設定 START ---
-LINE_CHANNEL_ACCESS_TOKEN = '0jtuGMTolXKvvsQmb3CcAoD9JdkADsDKe+xsICSU9xmIcdyHmAFCTPY3H04nI1DeHvD/SyMMj3qt/Rw+NEI6DsHk8n7qxJ4siyYKY3QxhrBWb9QAkPDDLsVCs6Xny+t+6QEVFvx3hVDUTWTe7AxdtQdB04t89/1O/w1cDnyilFU=' # 請務必填寫您驗證過的正確金鑰
+LINE_CHANNEL_ACCESS_TOKEN = '0jtuGMTolXKvvsQmb3CcAoD9JdkADsDKe+xsICSU9xmIcdyHmAFCTPY3H04nI1DeHvD/SyMMj3qt/Rw+NEI6DsHk8n7qxJ4siyYKY3QxhrBWb9QAkPDDLsVCs6Xny+t+6QEVFvx3hVDUTWTe7AxdtQdB04t89/1O/w1cDnyilFU='
 LINE_CHANNEL_SECRET = '74df866d9f3f4c47f3d5e86d67fcb673'
-# --- 本機設定 END ---
 
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 UTC_TZ = pytz.UTC
@@ -51,8 +45,6 @@ job_defaults = {'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 30}
 scheduler_lock = threading.Lock()
 scheduler = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults, timezone=UTC_TZ)
 
-
-# --- 海纜查詢的相關函式 ---
 def format_cable_data(data):
     if not data:
         return "目前沒有偵測到任何海纜事件。"
@@ -70,9 +62,7 @@ def format_cable_data(data):
         formatted_messages.append(message)
     return "\n".join(formatted_messages)
 
-# --- 新增的排程任務 ---
 def check_for_cable_updates():
-    """定期檢查海纜狀態，並在有變更時通知所有訂閱者"""
     logger.info("【排程任務】開始檢查海纜狀態更新...")
     try:
         with app.app_context():
@@ -80,18 +70,14 @@ def check_for_cable_updates():
             if new_data is None:
                 logger.warning("【排程任務】爬取失敗，本次跳過檢查。")
                 return
-
             new_titles = sorted([item.get("事件標題", "") for item in new_data])
             new_titles_str = "|".join(new_titles)
-
             last_state = get_last_cable_state()
             old_titles_str = last_state.last_event_titles if last_state else ""
-
             if new_titles_str != old_titles_str:
                 logger.info("【排程任務】偵測到海纜狀態變更！準備發送通知...")
                 notification_message = "🔔 海纜狀態更新！\n" + format_cable_data(new_data)
                 subscribers = get_all_cable_subscribers()
-                
                 if subscribers:
                     for sub in subscribers:
                         try:
@@ -100,28 +86,18 @@ def check_for_cable_updates():
                             time.sleep(1)
                         except Exception as push_error:
                             logger.error(f"發送通知給 {sub.subscriber_id} 失敗: {push_error}")
-                
                 update_last_cable_state(new_titles_str)
                 logger.info("【排程任務】已更新資料庫中的海纜狀態。")
             else:
                 logger.info("【排程任務】海纜狀態無變更。")
-
     except Exception as e:
         logger.error(f"【排程任務】check_for_cable_updates 執行時發生嚴重錯誤: {e}", exc_info=True)
-
 
 def safe_start_scheduler():
     with scheduler_lock:
         try:
             if not scheduler.running:
-                # 加入我們的週期性檢查任務，每 15 分鐘執行一次
-                scheduler.add_job(
-                    check_for_cable_updates,
-                    'interval',
-                    minutes=15,
-                    id='cable_update_checker',
-                    replace_existing=True
-                )
+                scheduler.add_job(check_for_cable_updates, 'interval', minutes=15, id='cable_update_checker', replace_existing=True)
                 scheduler.start()
                 logger.info("Scheduler started successfully with cable checker.")
         except Exception as e:
@@ -138,26 +114,31 @@ except Exception as e:
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# ---------------------------------
-# 輔助函式 (排程、通用)
-# ---------------------------------
 def send_reminder(event_id):
     try:
         with app.app_context():
             event = get_event(event_id)
-            if not event or event.reminder_sent: return
+            if not event: return
+            if not event.is_recurring and event.reminder_sent: return
             destination_id, display_name, event_content = event.target_id, event.target_display_name, event.event_content
-            event_dt = event.event_datetime.astimezone(TAIPEI_TZ)
-            confirm_template = ConfirmTemplate(
-                text=f"⏰ 提醒！\n\n@{display_name}\n記得在 {event_dt.strftime('%Y/%m/%d %H:%M')} 要「{event_content}」喔！",
-                actions=[
+            if not event.is_recurring and event.event_datetime:
+                event_dt = event.event_datetime.astimezone(TAIPEI_TZ)
+                time_info = f"在 {event_dt.strftime('%Y/%m/%d %H:%M')} "
+                actions = [
                     PostbackTemplateAction(label="確認收到", data=f"action=confirm_reminder&id={event_id}"),
                     PostbackTemplateAction(label="延後5分鐘", data=f"action=snooze_reminder&id={event_id}&minutes=5")
                 ]
+            else:
+                time_info = ""
+                actions = [PostbackTemplateAction(label="OK", data=f"action=confirm_reminder&id={event_id}")]
+            confirm_template = ConfirmTemplate(
+                text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
+                actions=actions
             )
             template_message = TemplateSendMessage(alt_text=f"提醒：{event_content}", template=confirm_template)
             line_bot_api.push_message(destination_id, template_message)
-            mark_reminder_sent(event_id)
+            if not event.is_recurring:
+                mark_reminder_sent(event_id)
     except Exception as e:
         logger.error(f"Error in send_reminder for event_id {event_id}: {e}", exc_info=True)
 
@@ -174,13 +155,11 @@ def safe_add_job(func, run_date, args, job_id):
 
 def send_help_message(reply_token):
     help_text = """--- 提醒功能 ---
-格式：提醒 [誰] [日期] [時間] [事件]
-(注意：誰和日期之間必須有空格)
-範例：提醒 我 明天 10:30 開會
+提醒 [誰] [日期] [時間] [事件]
+週期提醒：設定每日/每週重複提醒。
 
 --- 地點功能 ---
-請輸入「地點」或「地點清單」
-即可透過按鈕管理您的地點記錄。
+地點：透過按鈕管理您的地點記錄。
 
 --- 資訊查詢 ---
 海纜狀態：手動查詢最新狀態。
@@ -188,15 +167,10 @@ def send_help_message(reply_token):
 取消訂閱海纜通知：取消主動通知。
 
 --- 通用指令 ---
-在任何操作過程中，可隨時輸入「取消」
-來中斷目前操作。
+取消：中斷目前所有操作。
 """
     line_bot_api.reply_message(reply_token, TextSendMessage(text=help_text))
 
-
-# ---------------------------------
-# Webhook 路由與核心處理邏輯
-# ---------------------------------
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -213,7 +187,6 @@ def callback():
 def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
-
     try:
         if text == '取消':
             if user_id in user_states:
@@ -222,13 +195,18 @@ def handle_message(event):
             else:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有進行中的操作喔！"))
             return
-
-        if user_id in user_states and user_states[user_id]['action'] == 'awaiting_loc_name':
-            location.handle_save_location_command(event, line_bot_api, user_states)
-            return
-
+        if user_id in user_states:
+            state_action = user_states[user_id].get('action')
+            if state_action == 'awaiting_loc_name':
+                location.handle_save_location_command(event, line_bot_api, user_states)
+                return
+            elif state_action == 'awaiting_recurring_content':
+                recurring_reminder.handle_content_input(event, line_bot_api, user_states, scheduler, send_reminder, TAIPEI_TZ)
+                return
         if text.startswith('提醒'):
             reminder.handle_reminder_command(event, line_bot_api, TAIPEI_TZ)
+        elif text == '週期提醒':
+            recurring_reminder.start_flow(event, line_bot_api, user_states)
         elif text == '海纜狀態':
             handle_cable_command(event)
         elif text == '訂閱海纜通知':
@@ -236,20 +214,14 @@ def handle_message(event):
             sub_id = getattr(source, f'{source.type}_id', None)
             if sub_id:
                 result = add_cable_subscriber(sub_id, source.type)
-                reply_text = {
-                    "success": "✅ 成功訂閱！當海纜狀態有任何更新時，我會主動通知您。",
-                    "already_subscribed": "ℹ️ 您已經訂閱過了喔！"
-                }.get(result, "❌ 訂閱失敗，請稍後再試。")
+                reply_text = {"success": "✅ 成功訂閱！當海纜狀態有任何更新時，我會主動通知您。", "already_subscribed": "ℹ️ 您已經訂閱過了喔！"}.get(result, "❌ 訂閱失敗，請稍後再試。")
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         elif text == '取消訂閱海纜通知':
             source = event.source
             sub_id = getattr(source, f'{source.type}_id', None)
             if sub_id:
                 result = remove_cable_subscriber(sub_id)
-                reply_text = {
-                    "success": "✅ 已為您取消訂閱。",
-                    "not_found": "ℹ️ 您尚未訂閱，無需取消。"
-                }.get(result, "❌ 操作失敗，請稍後再試。")
+                reply_text = {"success": "✅ 已為您取消訂閱。", "not_found": "ℹ️ 您尚未訂閱，無需取消。"}.get(result, "❌ 操作失敗，請稍後再試。")
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         elif text.startswith('刪除地點：'):
             location.handle_delete_location_command(event, line_bot_api)
@@ -285,6 +257,8 @@ def handle_postback(event):
             location.handle_location_postback(event, line_bot_api, user_states)
         elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder']:
             reminder.handle_reminder_postback(event, line_bot_api, send_reminder, safe_add_job, TAIPEI_TZ)
+        elif action in ['toggle_weekday', 'set_recurring_time']:
+            recurring_reminder.handle_postback(event, line_bot_api, user_states)
     except Exception as e:
         logger.error(f"Error in handle_postback: {e}", exc_info=True)
 
@@ -315,12 +289,10 @@ def handle_cable_command(event):
         message_text = format_cable_data(cable_data_cache)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=message_text))
         return
-
     if not scraper_lock.acquire(blocking=False):
         logger.info("已有爬蟲正在執行，回覆使用者請稍候。")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="查詢正在進行中，請稍候幾秒後再試一次喔！"))
         return
-
     try:
         logger.info("快取失效，啟動新的背景爬蟲。")
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="正在查詢最新的海纜狀態，請稍候約 15-30 秒..."))
@@ -330,20 +302,13 @@ def handle_cable_command(event):
             logger.warning("無法獲取 source_id，無法啟動背景爬蟲。")
             scraper_lock.release()
             return
-        
-        scraper_thread = threading.Thread(
-            target=scrape_and_push, 
-            args=(source_id, scraper.scrape_cable_map_info_robust) 
-        )
+        scraper_thread = threading.Thread(target=scrape_and_push, args=(source_id, scraper.scrape_cable_map_info_robust))
         scraper_thread.start()
     except Exception as e:
         logger.error(f"啟動爬蟲時發生錯誤: {e}", exc_info=True)
         if scraper_lock.locked():
             scraper_lock.release()
 
-# ---------------------------------
-# 健康檢查與清理
-# ---------------------------------
 @app.route("/health")
 def health_check():
     return {"status": "healthy", "scheduler_running": scheduler.running}
@@ -360,8 +325,5 @@ def cleanup():
 
 atexit.register(cleanup)
 
-# ---------------------------------
-# 主程式進入點
-# ---------------------------------
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000, debug=True)
