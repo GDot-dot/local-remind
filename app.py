@@ -1,4 +1,4 @@
-# app.py (整合視覺化週期提醒功能)
+# app.py (整合提醒管理功能)
 
 import os
 import threading
@@ -13,7 +13,7 @@ from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, PostbackEvent,
     LocationMessage, ConfirmTemplate, PostbackTemplateAction, TemplateSendMessage,
-    FlexSendMessage
+    FlexSendMessage, QuickReply, QuickReplyButton, MessageAction,  PostbackAction, ButtonsTemplate
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -26,6 +26,7 @@ from features import reminder, location, scraper, recurring_reminder
 app = Flask(__name__)
 user_states = {}
 logging.basicConfig(level=logging.INFO)
+logging.getLogger('apscheduler').setLevel(logging.DEBUG) 
 logger = logging.getLogger(__name__)
 
 cable_data_cache = None
@@ -43,22 +44,16 @@ jobstores = {'default': SQLAlchemyJobStore(url=DATABASE_URL)}
 executors = {'default': ThreadPoolExecutor(max_workers=5)}
 job_defaults = {'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 30}
 scheduler_lock = threading.Lock()
-scheduler = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults, timezone=UTC_TZ)
+scheduler = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults, timezone=TAIPEI_TZ)
 
 def format_cable_data(data):
     if not data:
         return "目前沒有偵測到任何海纜事件。"
     formatted_messages = ["【海纜事件最新狀態】"]
     for item in data:
-        title = item.get("事件標題", "N/A")
-        status = item.get("狀態", "N/A")
-        description = item.get("描述", "N/A")
+        title, status, description = item.get("事件標題", "N/A"), item.get("狀態", "N/A"), item.get("描述", "N/A")
         timestamps = "\n".join(item.get("時間資訊", []))
-        message = (f"\n- - - - - - - - - -\n"
-                   f"🔹 標題: {title}\n"
-                   f"🔸 狀態: {status}\n"
-                   f"📃 描述: {description}\n"
-                   f"🕒 時間:\n{timestamps}")
+        message = (f"\n- - - - - - - - - -\n🔹 標題: {title}\n🔸 狀態: {status}\n📃 描述: {description}\n🕒 時間:\n{timestamps}")
         formatted_messages.append(message)
     return "\n".join(formatted_messages)
 
@@ -114,31 +109,66 @@ except Exception as e:
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# (在 app.py 中)
+
 def send_reminder(event_id):
+    """根據提醒類型（一次性或週期性）發送不同格式的提醒訊息"""
     try:
         with app.app_context():
             event = get_event(event_id)
-            if not event: return
-            if not event.is_recurring and event.reminder_sent: return
-            destination_id, display_name, event_content = event.target_id, event.target_display_name, event.event_content
+            if not event:
+                # 如果事件在排程後被刪除，就直接返回
+                logger.warning(f"send_reminder: 找不到 event_id {event_id}，可能已被刪除。")
+                return
+            
+            # 對於非週期性提醒，如果已經發送過，就跳過
+            if not event.is_recurring and event.reminder_sent:
+                logger.warning(f"send_reminder: event_id {event_id} 已標記為已發送，跳過。")
+                return
+
+            destination_id = event.target_id
+            display_name = event.target_display_name
+            event_content = event.event_content
+
+            # --- 核心修改：根據是否為週期性提醒，選擇不同的樣板 ---
+
             if not event.is_recurring and event.event_datetime:
+                # --- 處理一次性提醒 (使用 ConfirmTemplate) ---
                 event_dt = event.event_datetime.astimezone(TAIPEI_TZ)
                 time_info = f"在 {event_dt.strftime('%Y/%m/%d %H:%M')} "
-                actions = [
-                    PostbackTemplateAction(label="確認收到", data=f"action=confirm_reminder&id={event_id}"),
-                    PostbackTemplateAction(label="延後5分鐘", data=f"action=snooze_reminder&id={event_id}&minutes=5")
-                ]
-            else:
-                time_info = ""
-                actions = [PostbackTemplateAction(label="OK", data=f"action=confirm_reminder&id={event_id}")]
-            confirm_template = ConfirmTemplate(
-                text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
-                actions=actions
-            )
-            template_message = TemplateSendMessage(alt_text=f"提醒：{event_content}", template=confirm_template)
-            line_bot_api.push_message(destination_id, template_message)
-            if not event.is_recurring:
+                
+                template = ConfirmTemplate(
+                    text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
+                    actions=[
+                        PostbackTemplateAction(label="確認收到", data=f"action=confirm_reminder&id={event_id}"),
+                        PostbackTemplateAction(label="延後5分鐘", data=f"action=snooze_reminder&id={event_id}&minutes=5")
+                    ]
+                )
+                
+                # 只有一次性提醒才需要標記為已發送
                 mark_reminder_sent(event_id)
+
+            else:
+                # --- 處理週期性提醒 (改用 ButtonTemplate) ---
+                time_info = ""
+                
+                # 引用 ButtonTemplate (請確保在 app.py 頂部已 import)
+                from linebot.models import ButtonsTemplate
+                
+                template = ButtonsTemplate(
+                    text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
+                    actions=[
+                        PostbackTemplateAction(label="OK", data=f"action=confirm_reminder&id={event_id}")
+                    ]
+                )
+
+            # 統一發送訊息
+            template_message = TemplateSendMessage(
+                alt_text=f"提醒：{event_content}",
+                template=template
+            )
+            line_bot_api.push_message(destination_id, template_message)
+
     except Exception as e:
         logger.error(f"Error in send_reminder for event_id {event_id}: {e}", exc_info=True)
 
@@ -157,6 +187,7 @@ def send_help_message(reply_token):
     help_text = """--- 提醒功能 ---
 提醒 [誰] [日期] [時間] [事件]
 週期提醒：設定每日/每週重複提醒。
+提醒清單：查看與管理所有提醒。
 
 --- 地點功能 ---
 地點：透過按鈕管理您的地點記錄。
@@ -188,6 +219,7 @@ def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
     try:
+        # 通用取消指令
         if text == '取消':
             if user_id in user_states:
                 del user_states[user_id]
@@ -195,6 +227,8 @@ def handle_message(event):
             else:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有進行中的操作喔！"))
             return
+
+        # 状态检查
         if user_id in user_states:
             state_action = user_states[user_id].get('action')
             if state_action == 'awaiting_loc_name':
@@ -203,10 +237,16 @@ def handle_message(event):
             elif state_action == 'awaiting_recurring_content':
                 recurring_reminder.handle_content_input(event, line_bot_api, user_states, scheduler, send_reminder, TAIPEI_TZ)
                 return
-        if text.startswith('提醒'):
+
+        # --- 修正后的指令分流顺序 ---
+        if text == '提醒清單':
+            reminder.handle_list_reminders(event, line_bot_api)
+        elif text.startswith('提醒'):
             reminder.handle_reminder_command(event, line_bot_api, TAIPEI_TZ)
         elif text == '週期提醒':
             recurring_reminder.start_flow(event, line_bot_api, user_states)
+        elif text.startswith("刪除提醒ID:"):
+            reminder.handle_delete_reminder_command(event, line_bot_api, scheduler)
         elif text == '海纜狀態':
             handle_cable_command(event)
         elif text == '訂閱海纜通知':
@@ -214,14 +254,14 @@ def handle_message(event):
             sub_id = getattr(source, f'{source.type}_id', None)
             if sub_id:
                 result = add_cable_subscriber(sub_id, source.type)
-                reply_text = {"success": "✅ 成功訂閱！當海纜狀態有任何更新時，我會主動通知您。", "already_subscribed": "ℹ️ 您已經訂閱過了喔！"}.get(result, "❌ 訂閱失敗，請稍後再試。")
+                reply_text = {"success": "✅ 成功訂閱！", "already_subscribed": "ℹ️ 您已經訂閱過了！"}.get(result, "❌ 訂閱失敗")
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         elif text == '取消訂閱海纜通知':
             source = event.source
             sub_id = getattr(source, f'{source.type}_id', None)
             if sub_id:
                 result = remove_cable_subscriber(sub_id)
-                reply_text = {"success": "✅ 已為您取消訂閱。", "not_found": "ℹ️ 您尚未訂閱，無需取消。"}.get(result, "❌ 操作失敗，請稍後再試。")
+                reply_text = {"success": "✅ 已取消訂閱。", "not_found": "ℹ️ 您尚未訂閱。"}.get(result, "❌ 操作失敗")
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         elif text.startswith('刪除地點：'):
             location.handle_delete_location_command(event, line_bot_api)
@@ -231,6 +271,7 @@ def handle_message(event):
             location.handle_list_locations_command(event, line_bot_api)
         elif text.lower() in ['help', '說明', '幫助']:
             send_help_message(event.reply_token)
+
     except Exception as e:
         logger.error(f"Error in handle_message: {e}", exc_info=True)
         try:
@@ -255,6 +296,19 @@ def handle_postback(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="操作已取消。"))
         elif action.startswith('loc_'):
             location.handle_location_postback(event, line_bot_api, user_states)
+        elif action == 'delete_reminder_prompt':
+            events = get_all_events_by_user(user_id)
+            if not events:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="您沒有可刪除的提醒。"))
+                return
+            items = []
+            for e in events:
+                label_text = reminder.format_event_for_display(e)[:20]
+                action_text = f"刪除提醒ID:{e.id}"
+                items.append(QuickReplyButton(action=MessageAction(label=label_text, text=action_text)))
+            if len(items) > 12: items = items[:12]
+            items.append(QuickReplyButton(action=PostbackAction(label="返回", data="action=cancel")))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請點擊您想刪除的提醒：", quick_reply=QuickReply(items=items)))
         elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder']:
             reminder.handle_reminder_postback(event, line_bot_api, send_reminder, safe_add_job, TAIPEI_TZ)
         elif action in ['toggle_weekday', 'set_recurring_time']:
@@ -267,7 +321,7 @@ def scrape_and_push(source_id, scraper_function):
     try:
         logger.info(f"背景開始執行海纜爬蟲，目標: {source_id}")
         data = scraper_function()
-        message_text = format_cable_data(data) if data else "😥 抓取海纜資訊失敗，目標網站可能暫時無法訪問。"
+        message_text = format_cable_data(data) if data else "😥 抓取海纜資訊失敗"
         if data:
             cable_data_cache, cache_timestamp = data, datetime.now()
             logger.info("海纜資料快取已更新。")
@@ -284,22 +338,22 @@ def scrape_and_push(source_id, scraper_function):
 
 def handle_cable_command(event):
     global cable_data_cache, cache_timestamp
-    if cable_data_cache and cache_timestamp and (datetime.now() - cache_timestamp < timedelta(minutes=CACHE_DURATION_MINUTES)):
-        logger.info("命中快取，直接回覆海纜狀態。")
+    if cable_data_cache and (datetime.now() - cache_timestamp < timedelta(minutes=CACHE_DURATION_MINUTES)):
+        logger.info("命中快取")
         message_text = format_cable_data(cable_data_cache)
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=message_text))
         return
     if not scraper_lock.acquire(blocking=False):
-        logger.info("已有爬蟲正在執行，回覆使用者請稍候。")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="查詢正在進行中，請稍候幾秒後再試一次喔！"))
+        logger.info("已有爬蟲在執行")
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="查詢正在進行中，請稍候。"))
         return
     try:
-        logger.info("快取失效，啟動新的背景爬蟲。")
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="正在查詢最新的海纜狀態，請稍候約 15-30 秒..."))
+        logger.info("快取失效，啟動背景爬蟲。")
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="正在查詢最新的海纜狀態，請稍候..."))
         source = event.source
         source_id = getattr(source, f'{source.type}_id', None)
         if not source_id:
-            logger.warning("無法獲取 source_id，無法啟動背景爬蟲。")
+            logger.warning("無法獲取 source_id")
             scraper_lock.release()
             return
         scraper_thread = threading.Thread(target=scrape_and_push, args=(source_id, scraper.scrape_cable_map_info_robust))

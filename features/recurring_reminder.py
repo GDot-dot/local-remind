@@ -149,7 +149,6 @@ def handle_content_input(event, line_bot_api, user_states, scheduler, send_remin
         day_of_week=days_str.lower(),
         hour=int(hour),
         minute=int(minute),
-        timezone=TAIPEI_TZ,
         replace_existing=True,
         misfire_grace_time=60
     )

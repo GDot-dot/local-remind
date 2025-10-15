@@ -1,4 +1,4 @@
-# db.py (整合週期性提醒功能)
+# db.py (整合提醒管理功能)
 
 import os
 import time
@@ -29,15 +29,13 @@ class Event(Base):
     target_type = Column(String, nullable=False)
     target_display_name = Column(Text, nullable=False)
     event_content = Column(Text, nullable=False)
-    event_datetime = Column(DateTime(timezone=True), nullable=True) # 改為可為空，以支援週期提醒
+    event_datetime = Column(DateTime(timezone=True), nullable=True)
     reminder_time = Column(DateTime(timezone=True), nullable=True)
     reminder_sent = Column(Integer, default=0)
     created_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False)
-    
-    # --- 新增的週期性欄位 ---
-    is_recurring = Column(Integer, default=0, nullable=False) # 0=非週期, 1=週期性
-    recurrence_rule = Column(String, nullable=True) # 例如 "MON,WED,FRI|08:30"
-    next_run_time = Column(DateTime(timezone=True), nullable=True, index=True) # 由 APScheduler 管理
+    is_recurring = Column(Integer, default=0, nullable=False)
+    recurrence_rule = Column(String, nullable=True)
+    next_run_time = Column(DateTime(timezone=True), nullable=True, index=True)
 
     def __repr__(self):
         return f"<Event(id={self.id}, content='{self.event_content}')>"
@@ -106,14 +104,12 @@ def safe_db_operation(operation, max_retries=3):
 # ---------------------------------
 # 地點功能相關的資料庫函式
 # ---------------------------------
-        
 def add_location(user_id, name, address, latitude, longitude):
     def _add():
         db = next(get_db())
         try:
             existing_location = db.query(Location).filter_by(user_id=user_id, name=name).first()
-            if existing_location:
-                return f"名稱重複: 您已記錄過名為 '{name}' 的地點。"
+            if existing_location: return f"名稱重複: 您已記錄過名為 '{name}' 的地點。"
             new_loc = Location(user_id=user_id, name=name, address=address, latitude=latitude, longitude=longitude)
             db.add(new_loc)
             db.commit()
@@ -157,22 +153,13 @@ def delete_location_by_name(user_id, name):
 # ---------------------------------
 # 提醒功能相關的資料庫函式
 # ---------------------------------
-
 def add_event(creator_user_id, target_id, target_type, display_name, content, event_datetime, is_recurring=0, recurrence_rule=None, next_run_time=None):
     def _add_event():
         db = next(get_db())
         try:
-            new_event = Event(
-                creator_user_id=creator_user_id,
-                target_id=target_id,
-                target_type=target_type,
-                target_display_name=display_name,
-                event_content=content,
-                event_datetime=event_datetime,
-                is_recurring=is_recurring,
-                recurrence_rule=recurrence_rule,
-                next_run_time=next_run_time
-            )
+            new_event = Event(creator_user_id=creator_user_id, target_id=target_id, target_type=target_type,
+                              target_display_name=display_name, event_content=content, event_datetime=event_datetime,
+                              is_recurring=is_recurring, recurrence_rule=recurrence_rule, next_run_time=next_run_time)
             db.add(new_event)
             db.commit()
             db.refresh(new_event)
@@ -231,6 +218,32 @@ def reset_reminder_sent_status(event_id):
         finally:
             db.close()
     return safe_db_operation(_reset)
+
+def get_all_events_by_user(user_id):
+    """獲取某個使用者建立的所有提醒 (包含一次性與週期性)"""
+    def _get_all():
+        db = next(get_db())
+        try:
+            return db.query(Event).filter(Event.creator_user_id == user_id).order_by(Event.created_at.desc()).all()
+        finally:
+            db.close()
+    return safe_db_operation(_get_all)
+
+def delete_event_by_id(event_id, user_id):
+    """根據 Event ID 刪除提醒，並驗證操作者是否為本人"""
+    def _delete():
+        db = next(get_db())
+        try:
+            event_to_delete = db.query(Event).filter(Event.id == event_id, Event.creator_user_id == user_id).first()
+            if event_to_delete:
+                is_recurring = event_to_delete.is_recurring
+                db.delete(event_to_delete)
+                db.commit()
+                return {"status": "success", "is_recurring": is_recurring}
+            return {"status": "not_found"}
+        finally:
+            db.close()
+    return safe_db_operation(_delete)
 
 # ---------------------------------
 # 海纜監控相關的資料庫函式
