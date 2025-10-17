@@ -85,12 +85,35 @@ def handle_reminder_command(event, line_bot_api, TAIPEI_TZ):
     except Exception as e:
         raise e
 
-def handle_reminder_postback(event, line_bot_api, send_reminder_func, safe_add_job_func, TAIPEI_TZ):
-    """處理提醒功能相關的 Postback 事件"""
+
+def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func, safe_add_job_func, TAIPEI_TZ):
+    """處理提醒功能相關的 Postback 事件 (最終版)"""
+    from datetime import datetime, timedelta
+    from linebot.models import TextSendMessage
+    from db import get_event, update_reminder_time, reset_reminder_sent_status, delete_event_by_id
+
     data = dict(x.split('=', 1) for x in event.postback.data.split('&'))
     action = data.get('action')
-    if action == 'set_reminder':
-        event_id = int(data['id'])
+    event_id = int(data.get('id', 0))
+    user_id = event.source.user_id
+
+    if not event_id: return
+
+    if action == 'confirm_reminder':
+        event_record = get_event(event_id)
+        if event_record:
+            if not event_record.is_recurring:
+                result = delete_event_by_id(event_id, user_id)
+                if result.get("status") == "success":
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 任務已完成並移除！"))
+                else:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 收到確認，但移除資料時出錯。"))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 提醒已確認收到！"))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到該提醒，可能已被處理。"))
+    
+    elif action == 'set_reminder':
         event_record = get_event(event_id)
         if not event_record:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 找不到該提醒事件。"))
@@ -102,33 +125,33 @@ def handle_reminder_postback(event, line_bot_api, send_reminder_func, safe_add_j
             reply_msg_text = "✅ 好的，這個事件將不設定提醒。"
         else:
             value = int(data.get('val', 0))
-            delta_map = {'day': timedelta(days=value), 'minute': timedelta(minutes=value)}
-            delta = delta_map.get(reminder_type)
-            if delta:
-                reminder_dt = event_dt - delta
-                if reminder_dt <= datetime.now(TAIPEI_TZ):
-                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 提醒時間已過，無法設定。"))
-                    return
-                if safe_add_job_func(send_reminder_func, reminder_dt, [event_id], f'reminder_{event_id}'):
-                    reply_msg_text = f"✅ 設定完成！將於 {reminder_dt.strftime('%Y/%m/%d %H:%M')} 提醒您。"
-                else:
-                    reply_msg_text = "❌ 設定提醒時發生錯誤。"
+            delta = timedelta(days=value) if reminder_type == 'day' else timedelta(minutes=value)
+            reminder_dt = event_dt - delta
+            if reminder_dt <= datetime.now(TAIPEI_TZ):
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 提醒時間已過，無法設定。"))
+                return
+            if safe_add_job_func(send_reminder_func, reminder_dt, [event_id], f'reminder_{event_id}'):
+                reply_msg_text = f"✅ 設定完成！將於 {reminder_dt.strftime('%Y/%m/%d %H:%M')} 提醒您。"
+            else:
+                reply_msg_text = "❌ 設定提醒時發生錯誤。"
         if update_reminder_time(event_id, reminder_dt):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_msg_text))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新資料庫失敗。"))
-    elif action == 'confirm_reminder':
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 提醒已確認收到！"))
-    elif action == 'snooze_reminder':
-        event_id = int(data['id'])
-        minutes = int(data.get('minutes', 5))
-        reset_reminder_sent_status(event_id)
-        snooze_time = datetime.now(TAIPEI_TZ) + timedelta(minutes=minutes)
-        if safe_add_job_func(send_reminder_func, snooze_time, [event_id], f'reminder_{event_id}'):
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⏰ 好的，{minutes}分鐘後再次提醒您！"))
-        else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 延後提醒設定失敗。"))
 
+    elif action == 'snooze_reminder':
+        event_record = get_event(event_id)
+        if event_record and not event_record.is_recurring:
+            minutes = int(data.get('minutes', 5))
+            reset_reminder_sent_status(event_id)
+            snooze_time = datetime.now(TAIPEI_TZ) + timedelta(minutes=minutes)
+            if safe_add_job_func(send_reminder_func, snooze_time, [event_id], f'reminder_{event_id}'):
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⏰ 好的，{minutes}分鐘後再次提醒您！"))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 延後提醒設定失敗。"))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="週期性提醒不支援延後功能。"))
+            
 def format_event_for_display(event):
     """將 Event 物件格式化為一行文字描述"""
     if event.is_recurring:

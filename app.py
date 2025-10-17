@@ -112,31 +112,31 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # (在 app.py 中)
 
 def send_reminder(event_id):
-    """根據提醒類型（一次性或週期性）發送不同格式的提醒訊息"""
+    """根據提醒類型發送訊息，並管理任務生命週期"""
     try:
         with app.app_context():
             event = get_event(event_id)
             if not event:
-                # 如果事件在排程後被刪除，就直接返回
-                logger.warning(f"send_reminder: 找不到 event_id {event_id}，可能已被刪除。")
+                logger.warning(f"send_reminder: 找不到 event_id {event_id}，嘗試從排程器中移除。")
+                # 如果事件在資料庫中被刪除，也要確保排程器中的任務被移除
+                scheduler.remove_job(f"reminder_{event_id}", ignore_missing=True)
+                scheduler.remove_job(f"recurring_{event_id}", ignore_missing=True)
                 return
-            
-            # 對於非週期性提醒，如果已經發送過，就跳過
+
+            # 對於一次性提醒，如果已發送，則絕對不再執行
             if not event.is_recurring and event.reminder_sent:
-                logger.warning(f"send_reminder: event_id {event_id} 已標記為已發送，跳過。")
+                logger.warning(f"send_reminder: event_id {event_id} 已發送，跳過。")
                 return
 
             destination_id = event.target_id
             display_name = event.target_display_name
             event_content = event.event_content
 
-            # --- 核心修改：根據是否為週期性提醒，選擇不同的樣板 ---
-
-            if not event.is_recurring and event.event_datetime:
-                # --- 處理一次性提醒 (使用 ConfirmTemplate) ---
+            # 根據是否為週期性提醒，選擇不同的樣板
+            if not event.is_recurring:
+                # --- 一次性提醒 ---
                 event_dt = event.event_datetime.astimezone(TAIPEI_TZ)
                 time_info = f"在 {event_dt.strftime('%Y/%m/%d %H:%M')} "
-                
                 template = ConfirmTemplate(
                     text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
                     actions=[
@@ -144,17 +144,9 @@ def send_reminder(event_id):
                         PostbackTemplateAction(label="延後5分鐘", data=f"action=snooze_reminder&id={event_id}&minutes=5")
                     ]
                 )
-                
-                # 只有一次性提醒才需要標記為已發送
-                mark_reminder_sent(event_id)
-
             else:
-                # --- 處理週期性提醒 (改用 ButtonTemplate) ---
+                # --- 週期性提醒 ---
                 time_info = ""
-                
-                # 引用 ButtonTemplate (請確保在 app.py 頂部已 import)
-                from linebot.models import ButtonsTemplate
-                
                 template = ButtonsTemplate(
                     text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
                     actions=[
@@ -162,12 +154,17 @@ def send_reminder(event_id):
                     ]
                 )
 
-            # 統一發送訊息
-            template_message = TemplateSendMessage(
-                alt_text=f"提醒：{event_content}",
-                template=template
-            )
+            template_message = TemplateSendMessage(alt_text=f"提醒：{event_content}", template=template)
             line_bot_api.push_message(destination_id, template_message)
+            logger.info(f"成功發送提醒 for event_id: {event_id}")
+
+            # --- 核心修改：發送成功後，才處理任務狀態 ---
+            if not event.is_recurring:
+                # 對於一次性提醒，標記為已發送
+                mark_reminder_sent(event_id)
+                # 並且從排程器中【徹底移除】這個任務，防止 misfire 導致的重複執行
+                scheduler.remove_job(f"reminder_{event_id}", ignore_missing=True)
+                logger.info(f"已從排程器移除一次性任務 reminder_{event_id}")
 
     except Exception as e:
         logger.error(f"Error in send_reminder for event_id {event_id}: {e}", exc_info=True)
@@ -310,7 +307,8 @@ def handle_postback(event):
             items.append(QuickReplyButton(action=PostbackAction(label="返回", data="action=cancel")))
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請點擊您想刪除的提醒：", quick_reply=QuickReply(items=items)))
         elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder']:
-            reminder.handle_reminder_postback(event, line_bot_api, send_reminder, safe_add_job, TAIPEI_TZ)
+            # --- 核心修正：確保傳遞了所有必要的函式 ---
+            reminder.handle_reminder_postback(event, line_bot_api, scheduler, send_reminder, safe_add_job, TAIPEI_TZ)
         elif action in ['toggle_weekday', 'set_recurring_time']:
             recurring_reminder.handle_postback(event, line_bot_api, user_states)
     except Exception as e:
