@@ -1,4 +1,4 @@
-# features/reminder.py (整合提醒管理功能)
+# features/reminder.py (最終完整版)
 
 import re
 from datetime import datetime, timedelta
@@ -85,20 +85,14 @@ def handle_reminder_command(event, line_bot_api, TAIPEI_TZ):
     except Exception as e:
         raise e
 
-
 def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func, safe_add_job_func, TAIPEI_TZ):
-    """處理提醒功能相關的 Postback 事件 (最終版)"""
     from datetime import datetime, timedelta
     from linebot.models import TextSendMessage
-    from db import get_event, update_reminder_time, reset_reminder_sent_status, delete_event_by_id
-
     data = dict(x.split('=', 1) for x in event.postback.data.split('&'))
     action = data.get('action')
     event_id = int(data.get('id', 0))
     user_id = event.source.user_id
-
     if not event_id: return
-
     if action == 'confirm_reminder':
         event_record = get_event(event_id)
         if event_record:
@@ -112,7 +106,6 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 提醒已確認收到！"))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="找不到該提醒，可能已被處理。"))
-    
     elif action == 'set_reminder':
         event_record = get_event(event_id)
         if not event_record:
@@ -138,7 +131,6 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_msg_text))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新資料庫失敗。"))
-
     elif action == 'snooze_reminder':
         event_record = get_event(event_id)
         if event_record and not event_record.is_recurring:
@@ -153,12 +145,10 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="週期性提醒不支援延後功能。"))
             
 def format_event_for_display(event):
-    """將 Event 物件格式化為一行文字描述"""
     if event.is_recurring:
         try:
             rule_parts = event.recurrence_rule.split('|')
-            days_code = rule_parts[0].split(',')
-            time_str = rule_parts[1]
+            days_code, time_str = rule_parts[0].split(','), rule_parts[1]
             day_names = [WEEKDAYS_MAP.get(d, '') for d in days_code]
             schedule_desc = f"每週{','.join(day_names)} {time_str}"
         except:
@@ -168,7 +158,6 @@ def format_event_for_display(event):
     return f"【{schedule_desc}】{event.event_content}"
 
 def handle_list_reminders(event, line_bot_api):
-    """處理 '提醒清單' 指令"""
     user_id = event.source.user_id
     events = get_all_events_by_user(user_id)
     if not events:
@@ -184,7 +173,6 @@ def handle_list_reminders(event, line_bot_api):
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply))
 
 def handle_delete_reminder_command(event, line_bot_api, scheduler):
-    """處理 '刪除提醒ID:[id]' 的指令"""
     user_id = event.source.user_id
     text = event.message.text.strip()
     try:
@@ -193,15 +181,9 @@ def handle_delete_reminder_command(event, line_bot_api, scheduler):
         return
     result = delete_event_by_id(event_id_to_delete, user_id)
     if result.get("status") == "success":
-        job_id = None
-        if result.get("is_recurring"):
-            job_id = f"recurring_{event_id_to_delete}"
-        else:
-            job_id = f"reminder_{event_id_to_delete}"
-        
+        job_id = f"recurring_{event_id_to_delete}" if result.get("is_recurring") else f"reminder_{event_id_to_delete}"
         if job_id and scheduler.get_job(job_id):
             scheduler.remove_job(job_id)
-            
         reply_text = "✅ 提醒已成功刪除。"
     else:
         reply_text = "🤔 找不到該提醒，或您沒有權限刪除。"
