@@ -1,4 +1,4 @@
-# db.py (整合提醒管理功能)
+# db.py (完整修正版 - 修正排序)
 
 import os
 import time
@@ -104,6 +104,7 @@ def safe_db_operation(operation, max_retries=3):
 # ---------------------------------
 # 地點功能相關的資料庫函式
 # ---------------------------------
+        
 def add_location(user_id, name, address, latitude, longitude):
     def _add():
         db = next(get_db())
@@ -153,6 +154,7 @@ def delete_location_by_name(user_id, name):
 # ---------------------------------
 # 提醒功能相關的資料庫函式
 # ---------------------------------
+
 def add_event(creator_user_id, target_id, target_type, display_name, content, event_datetime, is_recurring=0, recurrence_rule=None, next_run_time=None):
     def _add_event():
         db = next(get_db())
@@ -224,7 +226,9 @@ def get_all_events_by_user(user_id):
     def _get_all():
         db = next(get_db())
         try:
-            return db.query(Event).filter(Event.creator_user_id == user_id).order_by(Event.created_at.desc()).all()
+            # --- 核心修改：改為按 event_datetime 正序 (ASC) 排列 ---
+            # 這樣時間越早的會排在越上面。週期性提醒 (NULL) 會預設排在最前面。
+            return db.query(Event).filter(Event.creator_user_id == user_id).order_by(Event.event_datetime.asc()).all()
         finally:
             db.close()
     return safe_db_operation(_get_all)

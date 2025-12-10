@@ -14,7 +14,7 @@ from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, PostbackEvent,
     LocationMessage, ConfirmTemplate, PostbackTemplateAction, TemplateSendMessage,
     FlexSendMessage, QuickReply, QuickReplyButton, MessageAction,
-    PostbackAction, ButtonsTemplate
+    PostbackAction, ButtonsTemplate,DatetimePickerTemplateAction
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
@@ -68,38 +68,62 @@ except Exception as e:
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# (app.py)
 def send_reminder(event_id):
-    # (此函式內容不變)
+    """根據提醒類型發送訊息，並管理任務生命週期 (修正 ignore_missing 錯誤)"""
     try:
         with app.app_context():
             event = get_event(event_id)
             if not event:
-                scheduler.remove_job(f"reminder_{event_id}", ignore_missing=True)
-                scheduler.remove_job(f"recurring_{event_id}", ignore_missing=True)
+                logger.warning(f"send_reminder: 找不到 event_id {event_id}，嘗試從排程器中移除。")
+                # 修正：先檢查任務是否存在，再移除
+                if scheduler.get_job(f"reminder_{event_id}"):
+                    scheduler.remove_job(f"reminder_{event_id}")
+                if scheduler.get_job(f"recurring_{event_id}"):
+                    scheduler.remove_job(f"recurring_{event_id}")
                 return
-            if not event.is_recurring and event.reminder_sent: return
-            destination_id, display_name, event_content = event.target_id, event.target_display_name, event.event_content
+
+            if not event.is_recurring and event.reminder_sent:
+                logger.warning(f"send_reminder: event_id {event_id} 已發送，跳過。")
+                return
+
+            destination_id = event.target_id
+            display_name = event.target_display_name
+            event_content = event.event_content
+
             if not event.is_recurring:
+                # --- 一次性提醒 ---
                 event_dt = event.event_datetime.astimezone(TAIPEI_TZ)
                 time_info = f"在 {event_dt.strftime('%Y/%m/%d %H:%M')} "
-                template = ConfirmTemplate(
+                template = ButtonsTemplate(
                     text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
                     actions=[
                         PostbackTemplateAction(label="確認收到", data=f"action=confirm_reminder&id={event_id}"),
-                        PostbackTemplateAction(label="延後5分鐘", data=f"action=snooze_reminder&id={event_id}&minutes=5")
-                    ])
+                        PostbackTemplateAction(label="延後5分鐘", data=f"action=snooze_reminder&id={event_id}&minutes=5"),
+                        DatetimePickerTemplateAction(label="自訂延後", data=f"action=snooze_custom&id={event_id}", mode="datetime")
+                    ]
+                )
             else:
+                # --- 週期性提醒 ---
                 time_info = ""
                 template = ButtonsTemplate(
                     text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
-                    actions=[PostbackTemplateAction(label="OK", data=f"action=confirm_reminder&id={event_id}")])
+                    actions=[
+                        PostbackTemplateAction(label="OK", data=f"action=confirm_reminder&id={event_id}")
+                    ]
+                )
+
             template_message = TemplateSendMessage(alt_text=f"提醒：{event_content}", template=template)
             line_bot_api.push_message(destination_id, template_message)
             logger.info(f"成功發送提醒 for event_id: {event_id}")
+
             if not event.is_recurring:
                 mark_reminder_sent(event_id)
-                scheduler.remove_job(f"reminder_{event_id}", ignore_missing=True)
+                # 修正：先檢查任務是否存在，再移除
+                if scheduler.get_job(f"reminder_{event_id}"):
+                    scheduler.remove_job(f"reminder_{event_id}")
                 logger.info(f"已從排程器移除一次性任務 reminder_{event_id}")
+
     except Exception as e:
         logger.error(f"Error in send_reminder for event_id {event_id}: {e}", exc_info=True)
 
@@ -150,7 +174,11 @@ def callback():
 def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
+
     try:
+        # --- 預先計算當前時間 (修正點) ---
+        now_in_taipei = datetime.now(TAIPEI_TZ)
+
         if text == '取消':
             if user_id in user_states:
                 del user_states[user_id]
@@ -158,6 +186,7 @@ def handle_message(event):
             else:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有進行中的操作喔！"))
             return
+
         if user_id in user_states:
             state_action = user_states[user_id].get('action')
             if state_action == 'awaiting_loc_name':
@@ -166,19 +195,33 @@ def handle_message(event):
             elif state_action == 'awaiting_recurring_content':
                 recurring_reminder.handle_content_input(event, line_bot_api, user_states, scheduler, send_reminder, TAIPEI_TZ)
                 return
-        
-        # --- 簡化後的指令分流 ---
+
+        # --- 指令分流 ---
         if text == '提醒清單':
             reminder.handle_list_reminders(event, line_bot_api)
         elif text.startswith('提醒'):
-            reminder.handle_reminder_command(event, line_bot_api, TAIPEI_TZ)
+            # --- 修正呼叫：傳入 now_in_taipei ---
+            reminder.handle_reminder_command(event, line_bot_api, TAIPEI_TZ, now_in_taipei)
         elif text == '週期提醒':
             recurring_reminder.start_flow(event, line_bot_api, user_states)
         elif text.startswith("刪除提醒ID:"):
             reminder.handle_delete_reminder_command(event, line_bot_api, scheduler)
         elif text == '海纜狀態':
             handle_cable_command(event)
-        # --- 訂閱指令已被移除 ---
+        elif text == '訂閱海纜通知':
+            source = event.source
+            sub_id = getattr(source, f'{source.type}_id', None)
+            if sub_id:
+                result = add_cable_subscriber(sub_id, source.type)
+                reply_text = {"success": "✅ 成功訂閱！", "already_subscribed": "ℹ️ 您已經訂閱過了！"}.get(result, "❌ 訂閱失敗")
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+        elif text == '取消訂閱海纜通知':
+            source = event.source
+            sub_id = getattr(source, f'{source.type}_id', None)
+            if sub_id:
+                result = remove_cable_subscriber(sub_id)
+                reply_text = {"success": "✅ 已取消訂閱。", "not_found": "ℹ️ 您尚未訂閱。"}.get(result, "❌ 操作失敗")
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         elif text.startswith('刪除地點：'):
             location.handle_delete_location_command(event, line_bot_api)
         elif text.startswith('找地點'):
@@ -227,7 +270,7 @@ def handle_postback(event):
             if len(items) > 12: items = items[:12]
             items.append(QuickReplyButton(action=PostbackAction(label="返回", data="action=cancel")))
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請點擊您想刪除的提醒：", quick_reply=QuickReply(items=items)))
-        elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder']:
+        elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder', 'snooze_custom', 'delete_single', 'refresh_manage_panel']:
             reminder.handle_reminder_postback(event, line_bot_api, scheduler, send_reminder, safe_add_job, TAIPEI_TZ)
         elif action in ['toggle_weekday', 'set_recurring_time']:
             recurring_reminder.handle_postback(event, line_bot_api, user_states)
@@ -311,4 +354,4 @@ def cleanup():
 atexit.register(cleanup)
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
