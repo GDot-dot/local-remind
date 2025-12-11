@@ -1,4 +1,6 @@
-# db.py (整合重要提醒功能)
+# db.py (最終簡化版 - 只有提醒與地點)
+
+# db.py (修改後 - 強制優先使用雲端)
 
 import os
 import time
@@ -6,13 +8,45 @@ from datetime import datetime
 from sqlalchemy import create_engine, func, Column, Integer, String, Text, TIMESTAMP, DateTime, Float
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# --- 資料庫設定 ---
-DATABASE_URL = "sqlite:///./reminders.db"
+# --- 資料庫設定區塊 START ---
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False}
-)
+# 1. 您的 Neon 連線字串 (寫死在這裡)
+NEON_URL = "postgresql://neondb_owner:npg_1F3LyGaPClmO@ep-holy-bird-a1zdn8yc-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require"
+# 注意：移除了 &channel_binding=require，這參數有時在本機環境會導致連線問題，先拿掉比較保險
+
+# 2. 決定最終使用的 URL
+# 優先順序：環境變數 (Render) > 寫死的 NEON_URL (本機開發) > 本地 SQLite (備案)
+if os.environ.get('DATABASE_URL'):
+    # 如果是在 Render 雲端環境
+    final_url = os.environ.get('DATABASE_URL')
+elif NEON_URL:
+    # 如果是在本機，且有填寫 NEON_URL
+    final_url = NEON_URL
+else:
+    # 最後備案
+    final_url = "sqlite:///./reminders.db"
+
+# 3. 修正 Postgres 的網址開頭 (SQLAlchemy 要求的格式)
+if final_url and final_url.startswith("postgres://"):
+    final_url = final_url.replace("postgres://", "postgresql://", 1)
+
+# 4. 建立資料庫引擎
+try:
+    if "sqlite" in final_url:
+        engine = create_engine(final_url, connect_args={"check_same_thread": False})
+        print(f"⚠️ 使用本地資料庫: {final_url}")
+    else:
+        engine = create_engine(final_url)
+        # 嘗試連線測試，確保真的連得上
+        with engine.connect() as conn:
+            print("✅ 成功連線至雲端 PostgreSQL 資料庫！")
+except Exception as e:
+    print(f"❌ 雲端連線失敗: {e}")
+    print("⚠️ 自動切換回本地 SQLite 資料庫...")
+    final_url = "sqlite:///./reminders.db"
+    engine = create_engine(final_url, connect_args={"check_same_thread": False})
+
+# --- 資料庫設定區塊 END ---
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -36,10 +70,8 @@ class Event(Base):
     is_recurring = Column(Integer, default=0, nullable=False)
     recurrence_rule = Column(String, nullable=True)
     next_run_time = Column(DateTime(timezone=True), nullable=True, index=True)
-    
-    # --- 新增：重要提醒欄位 ---
-    priority_level = Column(Integer, default=0) # 0=普通, 1=綠, 2=黃, 3=紅
-    remaining_repeats = Column(Integer, default=0) # 剩餘重試次數
+    priority_level = Column(Integer, default=0)
+    remaining_repeats = Column(Integer, default=0)
 
     def __repr__(self):
         return f"<Event(id={self.id}, content='{self.event_content}')>"
@@ -56,19 +88,6 @@ class Location(Base):
 
     def __repr__(self):
         return f"<Location(name='{self.name}', user_id='{self.user_id}')>"
-
-class CableState(Base):
-    __tablename__ = 'cable_state'
-    id = Column(Integer, primary_key=True)
-    last_event_titles = Column(Text, nullable=True)
-    last_checked = Column(DateTime, default=datetime.utcnow)
-
-class CableSubscriber(Base):
-    __tablename__ = 'cable_subscribers'
-    id = Column(Integer, primary_key=True)
-    subscriber_id = Column(String, nullable=False, unique=True)
-    subscriber_type = Column(String, nullable=False)
-    subscribed_at = Column(DateTime, default=datetime.utcnow)
 
 # ---------------------------------
 # 核心資料庫函式
@@ -106,9 +125,8 @@ def safe_db_operation(operation, max_retries=3):
     return None
 
 # ---------------------------------
-# 地點功能相關的資料庫函式
+# 地點功能函式
 # ---------------------------------
-        
 def add_location(user_id, name, address, latitude, longitude):
     def _add():
         db = next(get_db())
@@ -119,26 +137,21 @@ def add_location(user_id, name, address, latitude, longitude):
             db.add(new_loc)
             db.commit()
             return "成功"
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_add)
 
 def get_location_by_name(user_id, name):
     def _get():
         db = next(get_db())
-        try:
-            return db.query(Location).filter_by(user_id=user_id, name=name).first()
-        finally:
-            db.close()
+        try: return db.query(Location).filter_by(user_id=user_id, name=name).first()
+        finally: db.close()
     return safe_db_operation(_get)
 
 def get_all_locations_by_user(user_id):
     def _get_all():
         db = next(get_db())
-        try:
-            return db.query(Location).filter_by(user_id=user_id).order_by(Location.name).all()
-        finally:
-            db.close()
+        try: return db.query(Location).filter_by(user_id=user_id).order_by(Location.name).all()
+        finally: db.close()
     return safe_db_operation(_get_all)
     
 def delete_location_by_name(user_id, name):
@@ -151,14 +164,12 @@ def delete_location_by_name(user_id, name):
                 db.commit()
                 return True
             return False
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_delete)
 
 # ---------------------------------
-# 提醒功能相關的資料庫函式
+# 提醒功能函式
 # ---------------------------------
-
 def add_event(creator_user_id, target_id, target_type, display_name, content, event_datetime, is_recurring=0, recurrence_rule=None, next_run_time=None, priority_level=0, remaining_repeats=0):
     def _add_event():
         db = next(get_db())
@@ -173,17 +184,14 @@ def add_event(creator_user_id, target_id, target_type, display_name, content, ev
             db.commit()
             db.refresh(new_event)
             return new_event.id
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_add_event)
 
 def get_event(event_id):
     def _get():
         db = next(get_db())
-        try:
-            return db.query(Event).filter(Event.id == event_id).first()
-        finally:
-            db.close()
+        try: return db.query(Event).filter(Event.id == event_id).first()
+        finally: db.close()
     return safe_db_operation(_get)
 
 def update_reminder_time(event_id, reminder_dt):
@@ -196,8 +204,7 @@ def update_reminder_time(event_id, reminder_dt):
                 db.commit()
                 return True
             return False
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_update)
 
 def mark_reminder_sent(event_id):
@@ -210,8 +217,7 @@ def mark_reminder_sent(event_id):
                 db.commit()
                 return True
             return False
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_mark)
 
 def reset_reminder_sent_status(event_id):
@@ -224,8 +230,7 @@ def reset_reminder_sent_status(event_id):
                 db.commit()
                 return True
             return False
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_reset)
 
 def decrease_remaining_repeats(event_id):
@@ -238,8 +243,7 @@ def decrease_remaining_repeats(event_id):
                 db.commit()
                 return event.remaining_repeats
             return 0
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_decrease)
 
 def get_all_events_by_user(user_id):
@@ -247,8 +251,7 @@ def get_all_events_by_user(user_id):
         db = next(get_db())
         try:
             return db.query(Event).filter(Event.creator_user_id == user_id).order_by(Event.event_datetime.asc()).all()
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_get_all)
 
 def delete_event_by_id(event_id, user_id):
@@ -262,75 +265,5 @@ def delete_event_by_id(event_id, user_id):
                 db.commit()
                 return {"status": "success", "is_recurring": is_recurring}
             return {"status": "not_found"}
-        finally:
-            db.close()
+        finally: db.close()
     return safe_db_operation(_delete)
-
-# ---------------------------------
-# 海纜監控相關的資料庫函式
-# ---------------------------------
-def get_last_cable_state():
-    def _get():
-        db = next(get_db())
-        try:
-            state = db.query(CableState).filter_by(id=1).first()
-            if not state:
-                new_state = CableState(id=1, last_event_titles="")
-                db.add(new_state)
-                db.commit()
-                db.refresh(new_state)
-            return state
-        finally:
-            db.close()
-    return safe_db_operation(_get)
-
-def update_last_cable_state(new_titles_str):
-    def _update():
-        db = next(get_db())
-        try:
-            state = db.query(CableState).filter_by(id=1).first()
-            if state:
-                state.last_event_titles = new_titles_str
-                state.last_checked = datetime.utcnow()
-                db.commit()
-            return True
-        finally:
-            db.close()
-    return safe_db_operation(_update)
-
-def add_cable_subscriber(sub_id, sub_type):
-    def _add():
-        db = next(get_db())
-        try:
-            existing = db.query(CableSubscriber).filter_by(subscriber_id=sub_id).first()
-            if existing: return "already_subscribed"
-            new_sub = CableSubscriber(subscriber_id=sub_id, subscriber_type=sub_type)
-            db.add(new_sub)
-            db.commit()
-            return "success"
-        finally:
-            db.close()
-    return safe_db_operation(_add)
-
-def remove_cable_subscriber(sub_id):
-    def _remove():
-        db = next(get_db())
-        try:
-            sub_to_delete = db.query(CableSubscriber).filter_by(subscriber_id=sub_id).first()
-            if sub_to_delete:
-                db.delete(sub_to_delete)
-                db.commit()
-                return "success"
-            return "not_found"
-        finally:
-            db.close()
-    return safe_db_operation(_remove)
-
-def get_all_cable_subscribers():
-    def _get_all():
-        db = next(get_db())
-        try:
-            return db.query(CableSubscriber).all()
-        finally:
-            db.close()
-    return safe_db_operation(_get_all)

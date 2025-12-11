@@ -1,4 +1,4 @@
-# features/reminder.py (最終完整版 - 修正刷新按鈕)
+# features/reminder.py (最終完整版)
 
 import re
 from datetime import datetime, timedelta
@@ -116,7 +116,6 @@ def handle_priority_reminder_command(event, line_bot_api, user_states, TAIPEI_TZ
     }
 
     buttons = []
-    # 按照時間順序排列
     for minutes, label in sorted(EARLY_REMINDER_OPTIONS.items(), key=lambda x: x[0]):
         buttons.append(
             ButtonComponent(
@@ -151,15 +150,12 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
 
     # --- 重新整理 / 翻頁 ---
     if action == 'refresh_manage_panel':
-        # 從 data 中獲取 page 參數，如果沒有則預設為 1
         try:
             page = int(data.get('page', 1))
         except ValueError:
             page = 1
-            
         events = get_all_events_by_user(user_id)
         if events:
-            # 傳入 page 參數
             bubble = create_management_flex(events, page=page)
             flex_message = FlexSendMessage(alt_text=f"提醒管理面板 (第 {page} 頁)", contents=bubble)
             line_bot_api.reply_message(event.reply_token, flex_message)
@@ -255,17 +251,17 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
         event_record = get_event(event_id)
         if event_record:
             if not event_record.is_recurring:
+                # 這是【單次提醒】和【重要提醒】
+                # 確認後一律刪除
                 result = delete_event_by_id(event_id, user_id)
                 if result.get("status") == "success":
-                    # 同時嘗試從排程器移除
-                    if scheduler.get_job(f"reminder_{event_id}"):
-                        scheduler.remove_job(f"reminder_{event_id}")
-                    
+                    if scheduler.get_job(f"reminder_{event_id}"): scheduler.remove_job(f"reminder_{event_id}")
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 任務已完成並移除！"))
                 else:
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 收到確認 (資料可能已被移除)。"))
             else:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 提醒已確認收到！"))
+                # 這是【週期性提醒】，不刪除
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 提醒已確認收到！(下個週期會繼續提醒)"))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="✅ 提醒已確認 (任務已結束)。"))
     
@@ -360,9 +356,8 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 刪除失敗。"))
 
-
 # --- Flex Message ---
-def create_management_flex(events, page=1): # 增加 page 參數
+def create_management_flex(events, page=1):
     if not events: return None
     
     ITEMS_PER_PAGE = 10
@@ -420,7 +415,6 @@ def create_management_flex(events, page=1): # 增加 page 參數
     return BubbleContainer(header=header, body=BoxComponent(layout='vertical', contents=body_contents), footer=BoxComponent(layout='vertical', spacing='sm', contents=footer_contents))
 
 def handle_list_reminders(event, line_bot_api):
-    """處理 '提醒清單' 指令"""
     user_id = event.source.user_id
     events = get_all_events_by_user(user_id)
     if not events:
@@ -431,7 +425,6 @@ def handle_list_reminders(event, line_bot_api):
     line_bot_api.reply_message(event.reply_token, flex_message)
 
 def handle_delete_reminder_command(event, line_bot_api, scheduler):
-    """(保留給文字指令刪除)"""
     user_id = event.source.user_id
     text = event.message.text.strip()
     try:

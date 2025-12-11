@@ -4,4 +4,5 @@ apscheduler
 python-dateutil
 SQLAlchemy
 pytz
-aiohttp
+psycopg2-binary
+gunicorn

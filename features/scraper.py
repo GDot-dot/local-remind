@@ -22,6 +22,8 @@ def scrape_cable_map_info_robust():
     options.add_argument('--headless') 
     # 2. 強制設定一個大的視窗尺寸，避免響應式設計隱藏元素
     options.add_argument('--window-size=1920,1080')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
     # 3. 增加反偵測參數
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     options.add_argument('--disable-blink-features=AutomationControlled') # 關鍵參數，防止被偵測

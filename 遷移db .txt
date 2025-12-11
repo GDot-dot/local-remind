@@ -1,0 +1,15 @@
+1.把現在的 reminders.db 複製一份成 reminders.db.backup_... (這是保險)。
+2.改名 (騰出空間)：它把原本的 reminders.db 改名為 reminders.db.old。
+reminders.db.old 裡面裝著您舊結構、有資料的內容。
+
+3.開新 DB (建立新結構)：腳本呼叫 init_db()。
+4.因為 reminders.db 不見了，init_db() 會根據您最新的 db.py 程式碼，自動建立一個全新的、空的、結構正確的 reminders.db。
+5.移植資料
+腳本同時打開 reminders.db.old (舊的) 和 reminders.db (新的)。
+它讀取舊的資料，然後一筆一筆寫入新的資料庫。
+因為新資料庫有 priority_level 欄位，而舊資料沒有，腳本會自動讓新欄位保持為預設值 (NULL 或 0)。
+完成：腳本結束。
+
+執行 移植+恢復舊提醒
+python migrate_db.py 
+python reschedule_jobs.py
