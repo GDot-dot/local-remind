@@ -1,6 +1,4 @@
-# db.py (最終簡化版 - 只有提醒與地點)
-
-# db.py (修改後 - 強制優先使用雲端)
+# db.py (修正版 - 確保導出 DATABASE_URL)
 
 import os
 import time
@@ -10,41 +8,42 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 
 # --- 資料庫設定區塊 START ---
 
-# 1. 您的 Neon 連線字串 (寫死在這裡)
+# 1. 您的 Neon 連線字串
 NEON_URL = "postgresql://neondb_owner:npg_1F3LyGaPClmO@ep-holy-bird-a1zdn8yc-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require"
-# 注意：移除了 &channel_binding=require，這參數有時在本機環境會導致連線問題，先拿掉比較保險
 
-# 2. 決定最終使用的 URL
-# 優先順序：環境變數 (Render) > 寫死的 NEON_URL (本機開發) > 本地 SQLite (備案)
+# 2. 決定使用的 URL (暫存變數)
 if os.environ.get('DATABASE_URL'):
-    # 如果是在 Render 雲端環境
-    final_url = os.environ.get('DATABASE_URL')
+    # Render 雲端環境
+    _url = os.environ.get('DATABASE_URL')
 elif NEON_URL:
-    # 如果是在本機，且有填寫 NEON_URL
-    final_url = NEON_URL
+    # 本機開發 (有填 Neon)
+    _url = NEON_URL
 else:
-    # 最後備案
-    final_url = "sqlite:///./reminders.db"
+    # 本機開發 (沒填 Neon)
+    _url = "sqlite:///./reminders.db"
 
-# 3. 修正 Postgres 的網址開頭 (SQLAlchemy 要求的格式)
-if final_url and final_url.startswith("postgres://"):
-    final_url = final_url.replace("postgres://", "postgresql://", 1)
+# 3. 修正 Postgres 的網址開頭
+if _url and _url.startswith("postgres://"):
+    _url = _url.replace("postgres://", "postgresql://", 1)
 
-# 4. 建立資料庫引擎
+# 4. 【關鍵修改】將最終結果賦值給 DATABASE_URL，讓 app.py 可以 import
+DATABASE_URL = _url
+
+# 5. 建立資料庫引擎
 try:
-    if "sqlite" in final_url:
-        engine = create_engine(final_url, connect_args={"check_same_thread": False})
-        print(f"⚠️ 使用本地資料庫: {final_url}")
+    if "sqlite" in DATABASE_URL:
+        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+        print(f"⚠️ 使用本地資料庫: {DATABASE_URL}")
     else:
-        engine = create_engine(final_url)
-        # 嘗試連線測試，確保真的連得上
-        with engine.connect() as conn:
-            print("✅ 成功連線至雲端 PostgreSQL 資料庫！")
+        engine = create_engine(DATABASE_URL)
+        # 簡單連線測試
+        # with engine.connect() as conn:
+        #     print("✅ 成功連線至雲端 PostgreSQL 資料庫！")
 except Exception as e:
-    print(f"❌ 雲端連線失敗: {e}")
-    print("⚠️ 自動切換回本地 SQLite 資料庫...")
-    final_url = "sqlite:///./reminders.db"
-    engine = create_engine(final_url, connect_args={"check_same_thread": False})
+    print(f"❌ 資料庫設定錯誤: {e}")
+    # 發生錯誤時的保底
+    DATABASE_URL = "sqlite:///./reminders.db"
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
 # --- 資料庫設定區塊 END ---
 
@@ -125,8 +124,9 @@ def safe_db_operation(operation, max_retries=3):
     return None
 
 # ---------------------------------
-# 地點功能函式
+# 地點功能相關的資料庫函式
 # ---------------------------------
+        
 def add_location(user_id, name, address, latitude, longitude):
     def _add():
         db = next(get_db())
@@ -137,21 +137,26 @@ def add_location(user_id, name, address, latitude, longitude):
             db.add(new_loc)
             db.commit()
             return "成功"
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_add)
 
 def get_location_by_name(user_id, name):
     def _get():
         db = next(get_db())
-        try: return db.query(Location).filter_by(user_id=user_id, name=name).first()
-        finally: db.close()
+        try:
+            return db.query(Location).filter_by(user_id=user_id, name=name).first()
+        finally:
+            db.close()
     return safe_db_operation(_get)
 
 def get_all_locations_by_user(user_id):
     def _get_all():
         db = next(get_db())
-        try: return db.query(Location).filter_by(user_id=user_id).order_by(Location.name).all()
-        finally: db.close()
+        try:
+            return db.query(Location).filter_by(user_id=user_id).order_by(Location.name).all()
+        finally:
+            db.close()
     return safe_db_operation(_get_all)
     
 def delete_location_by_name(user_id, name):
@@ -164,12 +169,14 @@ def delete_location_by_name(user_id, name):
                 db.commit()
                 return True
             return False
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_delete)
 
 # ---------------------------------
-# 提醒功能函式
+# 提醒功能相關的資料庫函式
 # ---------------------------------
+
 def add_event(creator_user_id, target_id, target_type, display_name, content, event_datetime, is_recurring=0, recurrence_rule=None, next_run_time=None, priority_level=0, remaining_repeats=0):
     def _add_event():
         db = next(get_db())
@@ -184,14 +191,17 @@ def add_event(creator_user_id, target_id, target_type, display_name, content, ev
             db.commit()
             db.refresh(new_event)
             return new_event.id
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_add_event)
 
 def get_event(event_id):
     def _get():
         db = next(get_db())
-        try: return db.query(Event).filter(Event.id == event_id).first()
-        finally: db.close()
+        try:
+            return db.query(Event).filter(Event.id == event_id).first()
+        finally:
+            db.close()
     return safe_db_operation(_get)
 
 def update_reminder_time(event_id, reminder_dt):
@@ -204,7 +214,8 @@ def update_reminder_time(event_id, reminder_dt):
                 db.commit()
                 return True
             return False
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_update)
 
 def mark_reminder_sent(event_id):
@@ -217,7 +228,8 @@ def mark_reminder_sent(event_id):
                 db.commit()
                 return True
             return False
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_mark)
 
 def reset_reminder_sent_status(event_id):
@@ -230,7 +242,8 @@ def reset_reminder_sent_status(event_id):
                 db.commit()
                 return True
             return False
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_reset)
 
 def decrease_remaining_repeats(event_id):
@@ -243,18 +256,22 @@ def decrease_remaining_repeats(event_id):
                 db.commit()
                 return event.remaining_repeats
             return 0
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_decrease)
 
 def get_all_events_by_user(user_id):
+    """獲取某個使用者建立的所有提醒 (包含一次性與週期性)"""
     def _get_all():
         db = next(get_db())
         try:
             return db.query(Event).filter(Event.creator_user_id == user_id).order_by(Event.event_datetime.asc()).all()
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_get_all)
 
 def delete_event_by_id(event_id, user_id):
+    """根據 Event ID 刪除提醒，並驗證操作者是否為本人"""
     def _delete():
         db = next(get_db())
         try:
@@ -265,5 +282,6 @@ def delete_event_by_id(event_id, user_id):
                 db.commit()
                 return {"status": "success", "is_recurring": is_recurring}
             return {"status": "not_found"}
-        finally: db.close()
+        finally:
+            db.close()
     return safe_db_operation(_delete)
