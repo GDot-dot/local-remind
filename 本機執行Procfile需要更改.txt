@@ -1,2 +1,6 @@
 web: python app.py
 ngrok: ngrok http 5000
+
+https://developers.line.biz/console/channel/2007742429/messaging-api
+Webhook URL 設定
+https://krill-strong-conversely.ngrok-free.app/callback

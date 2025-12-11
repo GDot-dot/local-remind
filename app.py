@@ -260,6 +260,14 @@ def handle_postback(event):
             recurring_reminder.handle_postback(event, line_bot_api, user_states)
     except Exception as e:
         logger.error(f"Error in handle_postback: {e}", exc_info=True)
+        
+@app.route("/health")
+def health_check():
+    return {"status": "healthy", "scheduler_running": scheduler.running}
+
+@app.route("/")
+def index():
+    return "LINE Bot Reminder Service is running!"
 
 # ---------------------------------
 # 主程式進入點 (移除 multiprocessing)
