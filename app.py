@@ -21,6 +21,7 @@ from apscheduler.executors.pool import ThreadPoolExecutor
 import pytz
 
 from db import *
+from db import DATABASE_URL
 # 移除 scraper 匯入
 from features import reminder, location, recurring_reminder
 
