@@ -6,7 +6,7 @@ import google.generativeai as genai
 from datetime import datetime
 
 # 設定 API Key
-api_key = os.environ.get("GOOGLE_API_KEY")
+api_key = os.environ.get("AIzaSyDcOMwWCIriGj_rQFaSJcLgJ-8N8Sq89JM")
 if api_key:
     genai.configure(api_key=api_key)
 
