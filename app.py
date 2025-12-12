@@ -181,10 +181,6 @@ def callback():
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
-d# app.py
-# 請確保最上面有這行: from features.ai_parser import parse_natural_language
-
-@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
