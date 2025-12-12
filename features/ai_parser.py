@@ -93,5 +93,5 @@ def parse_natural_language(user_text, current_time_str):
             return result
         return None
     except Exception as e:
-        print(f"AI Parsing Error: {e}")79f44ea73a30607fabdf2c1db144e44ce0578096
+        print(f"AI Parsing Error: {e}")
         return None
