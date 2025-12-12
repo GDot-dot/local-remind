@@ -11,10 +11,14 @@ primary_region = 'nrt'
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = false
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1
   processes = ['app']
+  
+[processes]
+  app = "gunicorn app:app --workers 1 --threads 8 --timeout 0 --bind 0.0.0.0:8080"
+  
 
 [[vm]]
   memory = '1gb'
