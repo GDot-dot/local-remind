@@ -181,11 +181,17 @@ def callback():
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
+d# app.py
+# 請確保最上面有這行: from features.ai_parser import parse_natural_language
+
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
-    source_type = event.source.type  # 取得來源類型: 'user', 'group', or 'room'
+    # 取得來源類型: 'user', 'group', or 'room'
+    source_type = event.source.type
 
+    # 【重點】這裡開始 try，對應最後面的 except
     try:
         now_in_taipei = datetime.now(TAIPEI_TZ)
 
@@ -243,30 +249,26 @@ def handle_message(event):
             send_help_message(event.reply_token)
             return
 
-        # --- 4. AI 智慧解析區塊 (當上述指令都沒中時) ---
-        
-        # 為了省資源，太短的訊息忽略 (例如 "哈囉", "嗯")
+        # --- 4. AI 智慧解析區塊 ---
+        # 條件：訊息長度 > 1 且不是上面那些指令
         if len(text) > 1: 
+            # 這裡使用一個內部的 try，避免 AI 錯誤影響主程式
             try:
-                # 呼叫 Gemini
                 current_time_str = now_in_taipei.strftime('%Y-%m-%d %H:%M:%S')
                 ai_result = parse_natural_language(text, current_time_str)
 
                 if ai_result:
-                    # AI 成功解析出時間與內容
                     parsed_dt_str = ai_result['event_datetime']
                     parsed_content = ai_result['event_content']
                     
-                    # 轉換時間格式
                     naive_dt = datetime.strptime(parsed_dt_str, "%Y-%m-%d %H:%M")
                     event_dt = TAIPEI_TZ.localize(naive_dt)
 
-                    # 檢查時間是否在過去
                     if event_dt <= now_in_taipei:
-                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="😅 AI 幫你算出來的時間已經過了，請再說一次具體一點的時間。"))
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="😅 AI 幫你算出來的時間已經過了，請再說一次。"))
                         return
 
-                    # 獲取使用者名稱
+                    # 顯示名稱
                     try:
                         profile = line_bot_api.get_profile(user_id)
                         display_name = profile.display_name
@@ -274,10 +276,9 @@ def handle_message(event):
                         display_name = "您"
                     
                     # 寫入資料庫
-                    # target_id 使用 user_id 代表私訊提醒，若要群組提醒可改為 event.source.group_id
                     event_id = add_event(
                         creator_user_id=user_id,
-                        target_id=user_id, 
+                        target_id=user_id, # 預設 AI 建立的提醒都是私訊自己
                         target_type='user',
                         display_name=display_name,
                         content=parsed_content,
@@ -286,39 +287,35 @@ def handle_message(event):
                     )
 
                     if event_id:
-                        # 跳出確認按鈕
                         from features.reminder import QuickReply, QuickReplyButton, PostbackAction
                         quick_reply = QuickReply(items=[
                             QuickReplyButton(action=PostbackAction(label="10分鐘前", data=f"action=set_reminder&id={event_id}&type=minute&val=10")),
                             QuickReplyButton(action=PostbackAction(label="不提醒", data=f"action=set_reminder&id={event_id}&type=none")),
                         ])
                         
-                        reply_text = f"🤖 AI 幫你設定好囉！\n\n時間：{event_dt.strftime('%Y/%m/%d %H:%M')}\n事項：{parsed_content}\n\n要提早提醒嗎？"
+                        reply_text = f"🤖 AI 設定成功！\n時間：{event_dt.strftime('%Y/%m/%d %H:%M')}\n事項：{parsed_content}"
                         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply))
-                        return # 成功就結束
-                        
+                        return
             except Exception as e:
-                # 如果 AI 解析失敗，只紀錄 Log，不要中斷，讓程式往下走到 fallback
                 logger.error(f"AI Logic Error: {e}")
-
+                # AI 失敗就繼續往下走
         
-        # --- 5. 最終防線 (解決群組太吵問題) ---
-
-        # 只有在「私聊 (user)」時，聽不懂才回傳說明
+        # --- 5. 最終防線 (解決群組太吵) ---
         if source_type == 'user':
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🤔 我聽不太懂，您可以試著說：「明天早上九點提醒我開會」或是輸入「說明」查看指令。"))
-        
-        # 如果是「群組 (group)」或「聊天室 (room)」，聽不懂就【保持安靜】，不回傳任何訊息
         else:
+            # 群組裡聽不懂就安靜
             return
 
+    # 【重點】這裡的 except 必須跟最上面的 try 對齊
     except Exception as e:
         logger.error(f"Error in handle_message: {e}", exc_info=True)
-        # 發生系統錯誤時，為了不讓機器人掛掉，可以選擇不回傳或回傳通用錯誤
         try:
-            # 僅在私訊時回傳錯誤提示，避免群組刷屏
+            # 只有私訊才回報錯誤，避免群組洗頻
             if source_type == 'user':
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 處理訊息時發生錯誤，請聯繫開發者。"))
+        except:
+            pass
 
 @handler.add(MessageEvent, message=LocationMessage)
 def handle_location_message(event):
