@@ -26,6 +26,38 @@ from db import DATABASE_URL
 # 移除 scraper 匯入
 from features import reminder, location, recurring_reminder
 
+# =========== 🔎 抓鬼大隊：開機檢查 (插入在最上面) ===========
+print("="*50)
+print("🚀 系統啟動，正在檢查環境變數...")
+all_keys = list(os.environ.keys())
+print(f"🔑 目前系統內有的變數名稱: {all_keys}")
+
+# 檢查 DATABASE_URL (對照組)
+if "DATABASE_URL" in os.environ:
+    print("✅ DATABASE_URL: 存在")
+else:
+    print("❌ DATABASE_URL: 消失了！")
+
+# 檢查 GOOGLE_API_KEY (實驗組)
+target_key = "GOOGLE_API_KEY"
+if target_key in os.environ:
+    val = os.environ[target_key]
+    print(f"✅ {target_key}: 存在！(長度: {len(val)})")
+else:
+    print(f"❌ {target_key}: 嚴重錯誤！找不到此變數！")
+    
+    # 模糊搜尋：看看有沒有長得很像的
+    for k in all_keys:
+        if "GOOGLE" in k:
+            print(f"⚠️ 發現疑似變數: '{k}' (長度: {len(k)}) <- 請檢查是否有空白鍵")
+
+print("="*50)
+# ========================================================
+
+
+
+
+
 app = Flask(__name__)
 user_states = {}
 logging.basicConfig(level=logging.INFO)
