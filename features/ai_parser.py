@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 def parse_natural_language(user_text, current_time_str):
     """
-    使用 Gemini 解析自然語言提醒 (自動尋找可用模型版)
+    使用 Gemini 解析自然語言提醒 (自動模型選擇 + 強力清洗版)
     """
     # 1. 抓取 Key
     api_key = None
@@ -24,35 +24,29 @@ def parse_natural_language(user_text, current_time_str):
     try:
         genai.configure(api_key=api_key)
 
-        # --- 🔍 關鍵步驟：叫 Google 交出菜單 ---
+        # 2. 自動選擇模型 (保留這個成功的邏輯)
         logger.info("🔍 正在查詢可用模型清單...")
         available_models = []
         target_model_name = None
 
         for m in genai.list_models():
-            # 只找支援文字生成的模型
             if 'generateContent' in m.supported_generation_methods:
                 available_models.append(m.name)
-                # 優先找 flash, 其次 pro, 再其次任何 gemini
                 if 'flash' in m.name and not target_model_name:
                     target_model_name = m.name
                 elif 'gemini' in m.name and not target_model_name:
                     target_model_name = m.name
 
-        logger.info(f"📋 Google 提供給你的模型有: {available_models}")
-
         if not target_model_name:
-            # 如果還是沒選到，就硬拿第一個
             if available_models:
                 target_model_name = available_models[0]
             else:
-                logger.error("❌ [AI] 嚴重錯誤: 你的 API Key 沒有權限存取任何文字生成模型！")
+                logger.error("❌ [AI] 嚴重錯誤: 帳號沒有可用模型")
                 return None
         
         logger.info(f"✅ 系統自動選擇使用模型: {target_model_name}")
-        # ----------------------------------------
 
-        # 2. 初始化模型 (使用自動選到的那個)
+        # 3. 發送請求
         model = genai.GenerativeModel(target_model_name)
         
         prompt = f"""
@@ -73,14 +67,23 @@ def parse_natural_language(user_text, current_time_str):
         logger.info(f"📤 [AI] 發送請求: {user_text}")
         response = model.generate_content(prompt)
         raw_text = response.text
-        logger.info(f"🤖 [AI] 收到回應: {raw_text}")
+        logger.info(f"🤖 [AI] 原始回應: {raw_text}")
 
-        # 清洗與解析
+        # --- 4. 強力清洗 (修正 Extra data 錯誤) ---
         clean_text = raw_text.strip()
+        
+        # 去除開頭的 Markdown 標記
         if clean_text.startswith("```json"):
-            clean_text = clean_text.replace("```json", "", 1)
-        if clean_text.startswith("```"):
-            clean_text = clean_text.replace("```", "")
+            clean_text = clean_text[7:]  # 移除 ```json
+        elif clean_text.startswith("```"):
+            clean_text = clean_text[3:]  # 移除 ```
+            
+        # 去除結尾的 Markdown 標記 (這就是上次缺少的!)
+        if clean_text.endswith("```"):
+            clean_text = clean_text[:-3] # 移除最後三個字元
+            
+        clean_text = clean_text.strip() # 最後再清一次空白
+        # ----------------------------------------
         
         result = json.loads(clean_text)
         
