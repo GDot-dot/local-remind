@@ -303,11 +303,17 @@ def handle_message(event):
                     except:
                         display_name = "您"
                     
+                    target_id = user_id # 預設為個人
+                    if source_type == 'group':
+                        target_id = event.source.group_id
+                    elif source_type == 'room':
+                        target_id = event.source.room_id
+                    
                     # 寫入資料庫
-                    event_id = add_event(
+                   event_id = add_event(
                         creator_user_id=user_id,
-                        target_id=user_id, # 預設 AI 建立的提醒都是私訊自己
-                        target_type='user',
+                        target_id=target_id,      # <--- 改用判斷後的 ID
+                        target_type=source_type,  # <--- 改用來源類型 (group/user)
                         display_name=display_name,
                         content=parsed_content,
                         event_datetime=event_dt,
