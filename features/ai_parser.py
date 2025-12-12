@@ -9,6 +9,10 @@ from datetime import datetime
 # 設定日誌記錄器 (這樣才能在 Fly logs 看到)
 logger = logging.getLogger(__name__)
 
+import pprint
+env_vars = os.environ.keys()
+logger.info(f"🔍 目前系統有的環境變數: {pprint.pformat(list(env_vars))}")
+
 # 取得 API Key
 api_key = os.environ.get("AIzaSyDcOMwWCIriGj_rQFaSJcLgJ-8N8Sq89JM")
 
