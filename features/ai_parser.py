@@ -8,9 +8,9 @@ logger = logging.getLogger(__name__)
 
 def parse_natural_language(user_text, current_time_str):
     """
-    使用 Gemini 解析自然語言提醒
+    使用 Gemini 解析自然語言提醒 (自動尋找可用模型版)
     """
-    # --- 1. 抓取 Key (模糊搜尋邏輯) ---
+    # 1. 抓取 Key
     api_key = None
     for key in os.environ.keys():
         if "GOOGLE_API_KEY" in key:
@@ -20,14 +20,40 @@ def parse_natural_language(user_text, current_time_str):
     if not api_key:
         logger.error("❌ [AI] 失敗: 找不到 GOOGLE_API_KEY")
         return None
-    # -------------------------------------------
 
     try:
-        # 2. 初始化模型 (更新套件後，這裡就能支援 1.5-flash 了)
         genai.configure(api_key=api_key)
+
+        # --- 🔍 關鍵步驟：叫 Google 交出菜單 ---
+        logger.info("🔍 正在查詢可用模型清單...")
+        available_models = []
+        target_model_name = None
+
+        for m in genai.list_models():
+            # 只找支援文字生成的模型
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+                # 優先找 flash, 其次 pro, 再其次任何 gemini
+                if 'flash' in m.name and not target_model_name:
+                    target_model_name = m.name
+                elif 'gemini' in m.name and not target_model_name:
+                    target_model_name = m.name
+
+        logger.info(f"📋 Google 提供給你的模型有: {available_models}")
+
+        if not target_model_name:
+            # 如果還是沒選到，就硬拿第一個
+            if available_models:
+                target_model_name = available_models[0]
+            else:
+                logger.error("❌ [AI] 嚴重錯誤: 你的 API Key 沒有權限存取任何文字生成模型！")
+                return None
         
-        # 改回最快最新的 1.5-flash
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        logger.info(f"✅ 系統自動選擇使用模型: {target_model_name}")
+        # ----------------------------------------
+
+        # 2. 初始化模型 (使用自動選到的那個)
+        model = genai.GenerativeModel(target_model_name)
         
         prompt = f"""
         你是一個智慧提醒助理。
@@ -37,7 +63,7 @@ def parse_natural_language(user_text, current_time_str):
         
         請分析使用者的輸入，提取出「提醒內容」和「提醒時間」。
         規則：
-        1. 如果使用者沒有明確說時間，請根據語意推斷（例如「明天早上」指明天 09:00，「下班後」指今天 18:30）。
+        1. 如果使用者沒有明確說時間，請根據語意推斷。
         2. 如果完全無法推斷時間，則回傳 null。
         3. 時間格式必須嚴格為 "YYYY-MM-DD HH:MM"。
         4. 回傳 JSON 格式：{{ "event_content": "...", "event_datetime": "..." }}
@@ -61,7 +87,6 @@ def parse_natural_language(user_text, current_time_str):
         if result.get("event_datetime") and result.get("event_content"):
             return result
         
-        logger.warning(f"⚠️ [AI] 解析失敗: 欄位不完整 - {result}")
         return None
 
     except Exception as e:
