@@ -2,26 +2,37 @@
 
 import os
 import json
+import logging
 import google.generativeai as genai
 from datetime import datetime
 
-# 設定 API Key
+# 設定日誌記錄器 (這樣才能在 Fly logs 看到)
+logger = logging.getLogger(__name__)
+
+# 取得 API Key
 api_key = os.environ.get("AIzaSyDcOMwWCIriGj_rQFaSJcLgJ-8N8Sq89JM")
-if api_key:
-    genai.configure(api_key=api_key)
 
 # 設定模型
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    generation_config={"response_mime_type": "application/json"}
-)
+if api_key:
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        generation_config={"response_mime_type": "application/json"}
+    )
+else:
+    model = None
 
 def parse_natural_language(user_text, current_time_str):
     """
     使用 Gemini 解析自然語言提醒
     """
+    # 1. 檢查 API Key 是否存在
     if not api_key:
-        print("❌ Error: GOOGLE_API_KEY is missing in environment variables.")
+        logger.error("❌ 嚴重錯誤: 找不到 GOOGLE_API_KEY！請檢查 Fly.io Secrets 設定。")
+        return None
+
+    if not model:
+        logger.error("❌ 嚴重錯誤: 模型未初始化 (可能是 API Key 無效)。")
         return None
 
     prompt = f"""
@@ -40,14 +51,14 @@ def parse_natural_language(user_text, current_time_str):
     """
 
     try:
+        logger.info(f"📤 正在發送請求給 Google AI: {user_text}")
         response = model.generate_content(prompt)
         raw_text = response.text
         
-        # --- 🐛 Debug 用：印出 AI 到底回了什麼 ---
-        print(f"🤖 AI Raw Response: {raw_text}") 
-        # ---------------------------------------
+        # 印出 AI 回傳的原始文字
+        logger.info(f"🤖 Google AI 回應: {raw_text}")
 
-        # 強力清洗：去除可能出現的 Markdown 標記
+        # 清洗資料
         clean_text = raw_text.strip()
         if clean_text.startswith("```json"):
             clean_text = clean_text.replace("```json", "", 1)
@@ -56,10 +67,14 @@ def parse_natural_language(user_text, current_time_str):
         
         result = json.loads(clean_text)
         
-        # 簡單驗證欄位是否存在
+        # 驗證結果
         if result.get("event_datetime") and result.get("event_content"):
+            logger.info("✅ AI 解析成功！")
             return result
+        
+        logger.warning("⚠️ AI 回傳了 JSON，但欄位缺漏。")
         return None
+
     except Exception as e:
-        print(f"❌ AI Parsing Error: {e}")
+        logger.error(f"❌ AI 解析發生錯誤: {e}")
         return None
