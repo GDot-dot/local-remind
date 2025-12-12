@@ -1,15 +1,14 @@
-FROM python:3.12.12 AS builder
+FROM python:3.10-slim
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN python -m venv .venv
-COPY requirements.txt ./
-RUN .venv/bin/pip install -r requirements.txt
-FROM python:3.12.12-slim
-WORKDIR /app
-COPY --from=builder /app/.venv .venv/
 COPY . .
-CMD ["/app/.venv/bin/flask", "run", "--host=0.0.0.0", "--port=8080"]
+
+# 設定環境變數，確保 Log 會顯示
+ENV PYTHONUNBUFFERED=1
+
+# 使用 Gunicorn 啟動
+CMD ["python", "-m", "gunicorn", "app:app", "--workers", "1", "--threads", "8", "--timeout", "0", "--bind", "0.0.0.0:8080"]
