@@ -6,3 +6,4 @@ SQLAlchemy
 pytz
 psycopg2-binary
 gunicorn
+google-generativeai

@@ -7,6 +7,7 @@ from flask import Flask, request, abort
 import logging
 import atexit
 
+from features.ai_parser import parse_natural_language 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
@@ -228,6 +229,76 @@ def handle_message(event):
             location.handle_list_locations_command(event, line_bot_api)
         elif text.lower() in ['help', '說明', '幫助']:
             send_help_message(event.reply_token)
+
+         # --- AI 智慧解析區塊 START ---
+        # 如果不是上述指令，我們假設使用者在說自然語言提醒
+        # 為了避免誤判，可以限制長度，或者判斷是否有時間關鍵字，這裡示範直接丟 AI
+        
+        # 為了省錢/省資源，太短的訊息可以忽略 (例如 "哈囉")
+        if len(text) > 1: 
+            # 呼叫 Gemini
+            current_time_str = now_in_taipei.strftime('%Y-%m-%d %H:%M:%S')
+            ai_result = parse_natural_language(text, current_time_str)
+
+            if ai_result:
+                # AI 成功解析出時間與內容
+                parsed_dt_str = ai_result['event_datetime']
+                parsed_content = ai_result['event_content']
+                
+                # 轉換時間格式
+                try:
+                    naive_dt = datetime.strptime(parsed_dt_str, "%Y-%m-%d %H:%M")
+                    event_dt = TAIPEI_TZ.localize(naive_dt)
+
+                    # 檢查時間是否在過去
+                    if event_dt <= now_in_taipei:
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="😅 AI 幫你算出來的時間已經過了，請再說一次具體一點的時間。"))
+                        return
+
+                    # 寫入資料庫 (使用你原本的邏輯)
+                    # 這裡模擬成使用者輸入了標準指令，或是直接呼叫 add_event
+                    
+                    # 獲取使用者名稱
+                    profile = line_bot_api.get_profile(user_id)
+                    display_name = profile.display_name
+                    
+                    event_id = add_event(
+                        creator_user_id=user_id,
+                        target_id=user_id, # 預設提醒自己
+                        target_type='user',
+                        display_name=display_name,
+                        content=parsed_content,
+                        event_datetime=event_dt,
+                        is_recurring=0
+                    )
+
+                    if event_id:
+                        # 跳出確認按鈕 (復用你原本的按鈕邏輯)
+                        from features.reminder import QuickReply, QuickReplyButton, PostbackAction
+                        quick_reply = QuickReply(items=[
+                            QuickReplyButton(action=PostbackAction(label="10分鐘前", data=f"action=set_reminder&id={event_id}&type=minute&val=10")),
+                            QuickReplyButton(action=PostbackAction(label="不提醒", data=f"action=set_reminder&id={event_id}&type=none")),
+                        ])
+                        
+                        reply_text = f"🤖 AI 幫你設定好囉！\n\n時間：{event_dt.strftime('%Y/%m/%d %H:%M')}\n事項：{parsed_content}\n\n要提早提醒嗎？"
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply))
+                        return
+                        
+                except Exception as e:
+                    logger.error(f"AI Logic Error: {e}")
+                    # 如果 AI 解析出來的時間格式有問題，就往下走，回傳「看不懂」
+        
+        # --- AI 智慧解析區塊 END ---
+
+        # 如果 AI 也看不懂，或者是 'help' 等其他文字
+        if text.lower() in ['help', '說明']:
+            send_help_message(event.reply_token)
+        else:
+            # 沒招了，回傳說明
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🤔 我聽不太懂，您可以試著說：「明天早上九點提醒我開會」或是輸入「說明」查看指令。"))
+
+    except Exception as e:
+        logger.error(f"Error: {e}")
 
     except Exception as e:
         logger.error(f"Error in handle_message: {e}", exc_info=True)
