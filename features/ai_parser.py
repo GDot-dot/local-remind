@@ -1,5 +1,3 @@
-# features/ai_parser.py
-
 import os
 import json
 import logging
@@ -12,21 +10,38 @@ def parse_natural_language(user_text, current_time_str):
     """
     使用 Gemini 解析自然語言提醒
     """
-    # 1. 取得並檢查 Key
-    api_key = os.environ.get("AIzaSyDcOMwWCIriGj_rQFaSJcLgJ-8N8Sq89JM")
+    # --- 🔍 暴力抓取 Key (解決隱形符號問題) ---
+    api_key = None
+    target_key_name = "AIzaSyDcOMwWCIriGj_rQFaSJcLgJ-8N8Sq89JM"
+
+    # 方法 1: 直接讀取
+    if target_key_name in os.environ:
+        api_key = os.environ[target_key_name]
+    
+    # 方法 2: 如果方法 1 失敗，遍歷所有變數找「長得像」的
     if not api_key:
-        logger.error("❌ [AI] 失敗: 系統環境變數中找不到 GOOGLE_API_KEY")
+        logger.warning("⚠️ 直接讀取失敗，嘗試模糊搜尋 Key...")
+        for key in os.environ.keys():
+            # 只要變數名稱包含 GOOGLE_API_KEY 就抓出來 (忽略前後空白或隱形符號)
+            if "GOOGLE_API_KEY" in key:
+                api_key = os.environ[key]
+                logger.info(f"✅ 透過搜尋找到 Key 了！(原始名稱: '{key}')")
+                break
+
+    # 如果還是沒有...
+    if not api_key:
+        logger.error(f"❌ [AI] 徹底失敗: 系統變數裡真的沒有 Key。現有變數: {list(os.environ.keys())}")
         return None
+    # -------------------------------------------
 
     try:
-        # 2. 初始化模型 (直接在這裡做，最穩)
+        # 初始化模型
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
             generation_config={"response_mime_type": "application/json"}
         )
         
-        # 3. 準備提示詞
         prompt = f"""
         你是一個智慧提醒助理。
         現在的時間是：{current_time_str} (Asia/Taipei)。
@@ -42,13 +57,12 @@ def parse_natural_language(user_text, current_time_str):
         5. 不要回傳任何其他文字。
         """
 
-        # 4. 發送請求
         logger.info(f"📤 [AI] 發送請求: {user_text}")
         response = model.generate_content(prompt)
         raw_text = response.text
         logger.info(f"🤖 [AI] 收到回應: {raw_text}")
 
-        # 5. 清洗與解析
+        # 清洗與解析
         clean_text = raw_text.strip()
         if clean_text.startswith("```json"):
             clean_text = clean_text.replace("```json", "", 1)
