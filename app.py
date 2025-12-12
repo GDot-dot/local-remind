@@ -315,13 +315,16 @@ def handle_message(event):
                     )
 
                     if event_id:
+                        # 跳出確認按鈕 (已更新為完整選項)
                         from features.reminder import QuickReply, QuickReplyButton, PostbackAction
                         quick_reply = QuickReply(items=[
                             QuickReplyButton(action=PostbackAction(label="10分鐘前", data=f"action=set_reminder&id={event_id}&type=minute&val=10")),
+                            QuickReplyButton(action=PostbackAction(label="30分鐘前", data=f"action=set_reminder&id={event_id}&type=minute&val=30")),
+                            QuickReplyButton(action=PostbackAction(label="1天前", data=f"action=set_reminder&id={event_id}&type=day&val=1")),
                             QuickReplyButton(action=PostbackAction(label="不提醒", data=f"action=set_reminder&id={event_id}&type=none")),
                         ])
                         
-                        reply_text = f"🤖 AI 設定成功！\n時間：{event_dt.strftime('%Y/%m/%d %H:%M')}\n事項：{parsed_content}"
+                        reply_text = f"🤖 AI 設定提醒成功！\n\n時間：{event_dt.strftime('%Y/%m/%d %H:%M')}\n事項：{parsed_content}\n\n要提早提醒嗎？"
                         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply))
                         return
             except Exception as e:

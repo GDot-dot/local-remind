@@ -274,7 +274,11 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
         reminder_dt, reply_msg_text = None, "❌ 未知的提醒類型。"
         reminder_type = data.get('type')
         if reminder_type == 'none':
-            reply_msg_text = "✅ 好的，這個事件將不設定提醒。"
+            delete_event_by_id(event_id, user_id)
+            reply_msg_text = "🗑️ OK，已取消記錄，不會出現在提醒清單中。"
+            
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_msg_text))
+            return
         else:
             value = int(data.get('val', 0))
             delta = timedelta(days=value) if reminder_type == 'day' else timedelta(minutes=value)
