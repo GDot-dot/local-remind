@@ -310,7 +310,7 @@ def handle_message(event):
                         target_id = event.source.room_id
                     
                     # 寫入資料庫
-                   event_id = add_event(
+                    event_id = add_event(
                         creator_user_id=user_id,
                         target_id=target_id,      # <--- 改用判斷後的 ID
                         target_type=source_type,  # <--- 改用來源類型 (group/user)
