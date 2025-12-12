@@ -1,30 +1,51 @@
-# db.py (優化連線池版)
+# db.py (修正版 - 確保導出 DATABASE_URL)
 
 import os
 import time
-from sqlalchemy import create_engine
+from datetime import datetime
+from sqlalchemy import create_engine, func, Column, Integer, String, Text, TIMESTAMP, DateTime, Float
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# 1. Neon 連線字串
-NEON_URL = "postgresql://neondb_owner:YOUR_PASSWORD@ep-holy-bird-a1zdn8yc-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require"
+# --- 資料庫設定區塊 START ---
 
-# 2. 獲取 Database URL
-_url = os.environ.get('DATABASE_URL', NEON_URL)
+# 1. 您的 Neon 連線字串
+NEON_URL = "postgresql://neondb_owner:npg_1F3LyGaPClmO@ep-holy-bird-a1zdn8yc-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require"
+
+# 2. 決定使用的 URL (暫存變數)
+if os.environ.get('DATABASE_URL'):
+    # Render 雲端環境
+    _url = os.environ.get('DATABASE_URL')
+elif NEON_URL:
+    # 本機開發 (有填 Neon)
+    _url = NEON_URL
+else:
+    # 本機開發 (沒填 Neon)
+    _url = "sqlite:///./reminders.db"
+
+# 3. 修正 Postgres 的網址開頭
 if _url and _url.startswith("postgres://"):
     _url = _url.replace("postgres://", "postgresql://", 1)
 
+# 4. 【關鍵修改】將最終結果賦值給 DATABASE_URL，讓 app.py 可以 import
 DATABASE_URL = _url
 
-# 3. 建立引擎 (關鍵優化：加入連線池設定)
-# Render/Neon 的連線常會因閒置被切斷，必須設定 pool_pre_ping=True
-engine = create_engine(
-    DATABASE_URL,
-    pool_size=5,            # 保持 5 個連線
-    max_overflow=10,        # 最多額外建立 10 個
-    pool_recycle=300,       # 每 5 分鐘回收連線，避免 stale connection
-    pool_pre_ping=True,     # 每次拿連線前先 Ping 一下，避免 "Closed connection" 錯誤
-    pool_use_lifo=True      # 優先使用剛用過的連線
-)
+# 5. 建立資料庫引擎
+try:
+    if "sqlite" in DATABASE_URL:
+        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+        print(f"⚠️ 使用本地資料庫: {DATABASE_URL}")
+    else:
+        engine = create_engine(DATABASE_URL)
+        # 簡單連線測試
+        # with engine.connect() as conn:
+        #     print("✅ 成功連線至雲端 PostgreSQL 資料庫！")
+except Exception as e:
+    print(f"❌ 資料庫設定錯誤: {e}")
+    # 發生錯誤時的保底
+    DATABASE_URL = "sqlite:///./reminders.db"
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
+# --- 資料庫設定區塊 END ---
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

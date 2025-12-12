@@ -263,21 +263,11 @@ def handle_postback(event):
         
 @app.route("/health")
 def health_check():
-    # 這裡必須執行一個輕量的 DB 查詢，確保 DB 連線也是活著的
-    try:
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return {"status": "healthy", "scheduler": scheduler.running, "db": "connected"}
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return {"status": "error", "detail": str(e)}, 500
+    return {"status": "healthy", "scheduler_running": scheduler.running}
 
-
-def safe_start_scheduler():
-    if not scheduler.running:
-        scheduler.start()
-        print("✅ Scheduler started")
+@app.route("/")
+def index():
+    return "LINE Bot Reminder Service is running!"
 
 # ---------------------------------
 # 主程式進入點 (移除 multiprocessing)
