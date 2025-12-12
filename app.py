@@ -184,10 +184,12 @@ def callback():
 def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
+    source_type = event.source.type  # 取得來源類型: 'user', 'group', or 'room'
 
     try:
         now_in_taipei = datetime.now(TAIPEI_TZ)
 
+        # 1. 優先處理【取消】指令
         if text == '取消':
             if user_id in user_states:
                 del user_states[user_id]
@@ -196,6 +198,7 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有進行中的操作喔！"))
             return
 
+        # 2. 處理【使用者狀態】(進行中的流程)
         if user_id in user_states:
             state_action = user_states[user_id].get('action')
             if state_action == 'awaiting_loc_name':
@@ -211,42 +214,50 @@ def handle_message(event):
                  line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請點擊上方按鈕選擇時間。"))
                  return
 
+        # 3. 處理【固定指令】
         if text == '提醒清單':
             reminder.handle_list_reminders(event, line_bot_api)
+            return
         elif text.startswith('重要提醒'):
             reminder.handle_priority_reminder_command(event, line_bot_api, user_states, TAIPEI_TZ)
+            return
         elif text.startswith('提醒'):
             reminder.handle_reminder_command(event, line_bot_api, TAIPEI_TZ, now_in_taipei)
+            return
         elif text == '週期提醒':
             recurring_reminder.start_flow(event, line_bot_api, user_states)
+            return
         elif text.startswith("刪除提醒ID:"):
             reminder.handle_delete_reminder_command(event, line_bot_api, scheduler)
+            return
         elif text.startswith('刪除地點：'):
             location.handle_delete_location_command(event, line_bot_api)
+            return
         elif text.startswith('找地點'):
             location.handle_find_location_command(event, line_bot_api)
+            return
         elif text == '地點清單' or text.lower() == '地點':
             location.handle_list_locations_command(event, line_bot_api)
+            return
         elif text.lower() in ['help', '說明', '幫助']:
             send_help_message(event.reply_token)
+            return
 
-         # --- AI 智慧解析區塊 START ---
-        # 如果不是上述指令，我們假設使用者在說自然語言提醒
-        # 為了避免誤判，可以限制長度，或者判斷是否有時間關鍵字，這裡示範直接丟 AI
+        # --- 4. AI 智慧解析區塊 (當上述指令都沒中時) ---
         
-        # 為了省錢/省資源，太短的訊息可以忽略 (例如 "哈囉")
+        # 為了省資源，太短的訊息忽略 (例如 "哈囉", "嗯")
         if len(text) > 1: 
-            # 呼叫 Gemini
-            current_time_str = now_in_taipei.strftime('%Y-%m-%d %H:%M:%S')
-            ai_result = parse_natural_language(text, current_time_str)
+            try:
+                # 呼叫 Gemini
+                current_time_str = now_in_taipei.strftime('%Y-%m-%d %H:%M:%S')
+                ai_result = parse_natural_language(text, current_time_str)
 
-            if ai_result:
-                # AI 成功解析出時間與內容
-                parsed_dt_str = ai_result['event_datetime']
-                parsed_content = ai_result['event_content']
-                
-                # 轉換時間格式
-                try:
+                if ai_result:
+                    # AI 成功解析出時間與內容
+                    parsed_dt_str = ai_result['event_datetime']
+                    parsed_content = ai_result['event_content']
+                    
+                    # 轉換時間格式
                     naive_dt = datetime.strptime(parsed_dt_str, "%Y-%m-%d %H:%M")
                     event_dt = TAIPEI_TZ.localize(naive_dt)
 
@@ -255,16 +266,18 @@ def handle_message(event):
                         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="😅 AI 幫你算出來的時間已經過了，請再說一次具體一點的時間。"))
                         return
 
-                    # 寫入資料庫 (使用你原本的邏輯)
-                    # 這裡模擬成使用者輸入了標準指令，或是直接呼叫 add_event
-                    
                     # 獲取使用者名稱
-                    profile = line_bot_api.get_profile(user_id)
-                    display_name = profile.display_name
+                    try:
+                        profile = line_bot_api.get_profile(user_id)
+                        display_name = profile.display_name
+                    except:
+                        display_name = "您"
                     
+                    # 寫入資料庫
+                    # target_id 使用 user_id 代表私訊提醒，若要群組提醒可改為 event.source.group_id
                     event_id = add_event(
                         creator_user_id=user_id,
-                        target_id=user_id, # 預設提醒自己
+                        target_id=user_id, 
                         target_type='user',
                         display_name=display_name,
                         content=parsed_content,
@@ -273,7 +286,7 @@ def handle_message(event):
                     )
 
                     if event_id:
-                        # 跳出確認按鈕 (復用你原本的按鈕邏輯)
+                        # 跳出確認按鈕
                         from features.reminder import QuickReply, QuickReplyButton, PostbackAction
                         quick_reply = QuickReply(items=[
                             QuickReplyButton(action=PostbackAction(label="10分鐘前", data=f"action=set_reminder&id={event_id}&type=minute&val=10")),
@@ -282,29 +295,30 @@ def handle_message(event):
                         
                         reply_text = f"🤖 AI 幫你設定好囉！\n\n時間：{event_dt.strftime('%Y/%m/%d %H:%M')}\n事項：{parsed_content}\n\n要提早提醒嗎？"
                         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply))
-                        return
+                        return # 成功就結束
                         
-                except Exception as e:
-                    logger.error(f"AI Logic Error: {e}")
-                    # 如果 AI 解析出來的時間格式有問題，就往下走，回傳「看不懂」
+            except Exception as e:
+                # 如果 AI 解析失敗，只紀錄 Log，不要中斷，讓程式往下走到 fallback
+                logger.error(f"AI Logic Error: {e}")
+
         
-        # --- AI 智慧解析區塊 END ---
+        # --- 5. 最終防線 (解決群組太吵問題) ---
 
-        # 如果 AI 也看不懂，或者是 'help' 等其他文字
-        if text.lower() in ['help', '說明']:
-            send_help_message(event.reply_token)
-        else:
-            # 沒招了，回傳說明
+        # 只有在「私聊 (user)」時，聽不懂才回傳說明
+        if source_type == 'user':
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🤔 我聽不太懂，您可以試著說：「明天早上九點提醒我開會」或是輸入「說明」查看指令。"))
-
-    except Exception as e:
-        logger.error(f"Error: {e}")
+        
+        # 如果是「群組 (group)」或「聊天室 (room)」，聽不懂就【保持安靜】，不回傳任何訊息
+        else:
+            return
 
     except Exception as e:
         logger.error(f"Error in handle_message: {e}", exc_info=True)
+        # 發生系統錯誤時，為了不讓機器人掛掉，可以選擇不回傳或回傳通用錯誤
         try:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 處理訊息時發生錯誤，請聯繫開發者。"))
-        except: pass
+            # 僅在私訊時回傳錯誤提示，避免群組刷屏
+            if source_type == 'user':
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 處理訊息時發生錯誤，請聯繫開發者。"))
 
 @handler.add(MessageEvent, message=LocationMessage)
 def handle_location_message(event):
