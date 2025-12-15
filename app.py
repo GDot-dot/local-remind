@@ -72,7 +72,15 @@ LINE_CHANNEL_SECRET = '74df866d9f3f4c47f3d5e86d67fcb673'
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 UTC_TZ = pytz.UTC
 
-jobstores = {'default': SQLAlchemyJobStore(url=DATABASE_URL)}
+jobstores = {
+    'default': SQLAlchemyJobStore(
+        url=DATABASE_URL,
+        engine_options={
+            "pool_pre_ping": True,
+            "pool_recycle": 300
+        }
+    )
+}
 executors = {'default': ThreadPoolExecutor(max_workers=5)}
 job_defaults = {'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 30}
 scheduler_lock = threading.Lock()

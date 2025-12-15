@@ -35,10 +35,13 @@ try:
         engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
         print(f"⚠️ 使用本地資料庫: {DATABASE_URL}")
     else:
-        engine = create_engine(DATABASE_URL)
-        # 簡單連線測試
-        # with engine.connect() as conn:
-        #     print("✅ 成功連線至雲端 PostgreSQL 資料庫！")
+        engine = create_engine(
+            DATABASE_URL,
+            pool_pre_ping=True,   # 每次連線前先檢查，死了就重連 (解決 SSL closed 錯誤)
+            pool_recycle=300,     # 每 300 秒(5分鐘) 自動回收連線，防止被雲端強制切斷
+            pool_size=5,
+            max_overflow=10
+        )
 except Exception as e:
     print(f"❌ 資料庫設定錯誤: {e}")
     # 發生錯誤時的保底
