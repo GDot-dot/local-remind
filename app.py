@@ -85,6 +85,82 @@ executors = {'default': ThreadPoolExecutor(max_workers=5)}
 job_defaults = {'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 30}
 scheduler_lock = threading.Lock()
 scheduler = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults, timezone=TAIPEI_TZ)
+def restore_jobs():
+    """
+    從資料庫讀取所有「週期性提醒」與「未發送的一次性提醒」，
+    並將它們重新加入排程器。
+    """
+    with app.app_context():
+        # 為了避免循環引用，這裡才 import db
+        from db import get_db, Event
+        
+        db = next(get_db())
+        try:
+            logger.info("♻️ 正在檢查並修復排程任務...")
+            
+            # 1. 找出所有【週期性提醒】(這些永遠需要被排程)
+            recurring_events = db.query(Event).filter(Event.is_recurring == 1).all()
+            
+            # 2. 找出所有【未發送】且【時間在未來】的一次性提醒
+            now = datetime.now(TAIPEI_TZ)
+            future_events = db.query(Event).filter(
+                Event.reminder_sent == 0,
+                Event.is_recurring == 0,
+                Event.reminder_time > now # 注意：這裡是檢查 reminder_time
+            ).all()
+
+            all_events = recurring_events + future_events
+            restored_count = 0
+
+            for event in all_events:
+                # 根據事件類型決定 Job ID
+                job_id = f"recurring_{event.id}" if event.is_recurring else f"reminder_{event.id}"
+                
+                # 如果排程器裡還沒有這個任務，就加進去
+                if not scheduler.get_job(job_id):
+                    try:
+                        if event.is_recurring:
+                            # 解析週期規則 (例如: "MON,WED|23:00")
+                            rule_parts = event.recurrence_rule.split('|')
+                            days_code = rule_parts[0].lower() # mon,wed
+                            time_parts = rule_parts[1].split(':')
+                            hour = int(time_parts[0])
+                            minute = int(time_parts[1])
+                            
+                            scheduler.add_job(
+                                send_reminder,
+                                trigger='cron',
+                                args=[event.id],
+                                id=job_id,
+                                day_of_week=days_code,
+                                hour=hour,
+                                minute=minute,
+                                timezone=TAIPEI_TZ,
+                                replace_existing=True
+                            )
+                        else:
+                            # 一次性提醒
+                            run_date = event.reminder_time.astimezone(TAIPEI_TZ)
+                            scheduler.add_job(
+                                send_reminder, 
+                                'date', 
+                                run_date=run_date, 
+                                args=[event.id], 
+                                id=job_id,
+                                replace_existing=True
+                            )
+                        
+                        restored_count += 1
+                        logger.info(f"  + 成功修復排程: ID {event.id} ({event.event_content})")
+                    except Exception as e:
+                        logger.error(f"  ! 修復 ID {event.id} 失敗: {e}")
+            
+            logger.info(f"✅ 排程修復完成！共重新註冊 {restored_count} 個任務。")
+
+        except Exception as e:
+            logger.error(f"❌ 排程修復過程發生錯誤: {e}")
+        finally:
+            db.close()
 
 def safe_start_scheduler():
     with scheduler_lock:
@@ -92,6 +168,11 @@ def safe_start_scheduler():
             if not scheduler.running:
                 scheduler.start()
                 logger.info("Scheduler started successfully.")
+                
+                # 【關鍵修改】啟動後，立刻執行一次修復任務
+                # 使用 Thread 避免卡住 Web Server 啟動
+                threading.Thread(target=restore_jobs).start()
+                
         except Exception as e:
             logger.error(f"Failed to start scheduler: {e}")
 
