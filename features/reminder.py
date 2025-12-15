@@ -376,22 +376,22 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
 def create_management_flex(events, page=1):
     if not events: return None
     
+    # 確保使用台北時區
+    TAIPEI_TZ = pytz.timezone('Asia/Taipei')
+
     # --- 1. 資料預處理與過濾 (Filter) ---
     valid_events = []
     for event in events:
         # A. 排除「已完成」的一次性任務
-        # 如果不是週期性(is_recurring=0) 且 已經發送過(reminder_sent=1)，就不顯示
         if not event.is_recurring and event.reminder_sent == 1:
             continue
 
         # B. 排除「未完成設定」的任務
-        # 如果不是週期性 且 提醒時間(reminder_time) 是空的，代表使用者還沒按時間按鈕，不顯示
         if not event.is_recurring and event.reminder_time is None:
             continue
             
         valid_events.append(event)
 
-    # 如果過濾完沒東西了，回傳 None
     if not valid_events:
         return None
 
@@ -403,7 +403,6 @@ def create_management_flex(events, page=1):
     
     display_events = valid_events[start_index:end_index]
     
-    # 如果翻頁後沒資料 (例如刪除後變空)，回到第一頁
     if not display_events and page > 1:
         return create_management_flex(events, page=1)
 
@@ -416,6 +415,10 @@ def create_management_flex(events, page=1):
     body_contents = []
     
     for event in display_events:
+        display_content = event.event_content
+        icon = "⏰"
+        time_text = "未設定"
+
         # 處理顯示文字與圖示
         if event.is_recurring:
             # 週期性提醒
@@ -428,18 +431,13 @@ def create_management_flex(events, page=1):
             except: 
                 time_text = "週期設定"
             icon = "🔄"
-            display_content = event.event_content
             
         else:
             # 一次性提醒
-            # 顯示的是「實際會響鈴」的時間 (reminder_time)
             if event.reminder_time:
-                local_time = event.reminder_time.astimezone()
+                # 【修正 1】強制轉為台北時間顯示，避免顯示成 UTC
+                local_time = event.reminder_time.astimezone(TAIPEI_TZ)
                 time_text = local_time.strftime('%Y/%m/%d %H:%M')
-            else:
-                time_text = "未設定時間"
-
-            icon = "⏰"
             
             # 處理重要程度顏色
             if event.priority_level == 3: icon = "🔴"
@@ -447,13 +445,12 @@ def create_management_flex(events, page=1):
             elif event.priority_level == 1: icon = "🟢"
 
             # --- C. 判斷是否為「延後」任務 ---
-            display_content = event.event_content
-            # 如果 實際提醒時間 > 原本事件時間，代表延後了
+            # 【修正 2】改用 timestamp() 比較，無視時區差異，只要差超過 60 秒就算延後
             if event.reminder_time and event.event_datetime:
-                # 容許 1 分鐘的誤差
-                if event.reminder_time > (event.event_datetime + timedelta(minutes=1)):
+                # 如果 實際提醒時間戳記 > 原本事件時間戳記 + 60秒
+                if event.reminder_time.timestamp() > (event.event_datetime.timestamp() + 60):
                     display_content = f"(延) {event.event_content}"
-                    icon = "💤" # 換成睡覺符號，代表貪睡/延後
+                    icon = "💤" # 換成睡覺符號
 
         # 建立單行組件
         row = BoxComponent(
