@@ -364,47 +364,112 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
 def create_management_flex(events, page=1):
     if not events: return None
     
+    # --- 1. 資料預處理與過濾 (Filter) ---
+    valid_events = []
+    for event in events:
+        # A. 排除「已完成」的一次性任務
+        # 如果不是週期性(is_recurring=0) 且 已經發送過(reminder_sent=1)，就不顯示
+        if not event.is_recurring and event.reminder_sent == 1:
+            continue
+
+        # B. 排除「未完成設定」的任務
+        # 如果不是週期性 且 提醒時間(reminder_time) 是空的，代表使用者還沒按時間按鈕，不顯示
+        if not event.is_recurring and event.reminder_time is None:
+            continue
+            
+        valid_events.append(event)
+
+    # 如果過濾完沒東西了，回傳 None
+    if not valid_events:
+        return None
+
+    # --- 2. 分頁邏輯 ---
     ITEMS_PER_PAGE = 10
-    total_events = len(events)
+    total_events = len(valid_events)
     start_index = (page - 1) * ITEMS_PER_PAGE
     end_index = start_index + ITEMS_PER_PAGE
     
-    display_events = events[start_index:end_index]
+    display_events = valid_events[start_index:end_index]
     
+    # 如果翻頁後沒資料 (例如刪除後變空)，回到第一頁
     if not display_events and page > 1:
         return create_management_flex(events, page=1)
 
-    header = BoxComponent(layout='vertical', contents=[TextComponent(text=f'📋 提醒管理 ({page})', weight='bold', size='xl', color='#1DB446')])
+    # --- 3. 建立 Flex Message ---
+    header = BoxComponent(
+        layout='vertical', 
+        contents=[TextComponent(text=f'📋 提醒管理 ({page})', weight='bold', size='xl', color='#1DB446')]
+    )
+    
     body_contents = []
     
     for event in display_events:
+        # 處理顯示文字與圖示
         if event.is_recurring:
+            # 週期性提醒
             try:
                 rule_parts = event.recurrence_rule.split('|')
                 days_code = rule_parts[0].split(',')
                 time_str = rule_parts[1]
                 day_names = [WEEKDAYS_MAP.get(d, '') for d in days_code]
                 time_text = f"每週{','.join(day_names)} {time_str}"
-            except: time_text = "週期設定"
+            except: 
+                time_text = "週期設定"
             icon = "🔄"
+            display_content = event.event_content
+            
         else:
-            time_text = event.event_datetime.astimezone().strftime('%Y/%m/%d %H:%M')
+            # 一次性提醒
+            # 顯示的是「實際會響鈴」的時間 (reminder_time)
+            if event.reminder_time:
+                local_time = event.reminder_time.astimezone()
+                time_text = local_time.strftime('%m/%d %H:%M')
+            else:
+                time_text = "未設定時間"
+
             icon = "⏰"
+            
+            # 處理重要程度顏色
             if event.priority_level == 3: icon = "🔴"
             elif event.priority_level == 2: icon = "🟡"
             elif event.priority_level == 1: icon = "🟢"
 
+            # --- C. 判斷是否為「延後」任務 ---
+            display_content = event.event_content
+            # 如果 實際提醒時間 > 原本事件時間，代表延後了
+            if event.reminder_time and event.event_datetime:
+                # 容許 1 分鐘的誤差
+                if event.reminder_time > (event.event_datetime + timedelta(minutes=1)):
+                    display_content = f"(延) {event.event_content}"
+                    icon = "💤" # 換成睡覺符號，代表貪睡/延後
+
+        # 建立單行組件
         row = BoxComponent(
-            layout='horizontal', margin='md', align_items='center',
+            layout='horizontal', 
+            margin='md', 
+            align_items='center',
             contents=[
-                BoxComponent(layout='vertical', flex=1, contents=[TextComponent(text=f"{icon} {time_text}", size='xs', color='#aaaaaa'), TextComponent(text=event.event_content, size='sm', color='#555555', wrap=True)]),
-                ButtonComponent(style='link', height='sm', width='40px', flex=0, action=PostbackAction(label='❌', data=f'action=delete_single&id={event.id}'))
+                BoxComponent(
+                    layout='vertical', 
+                    flex=1, 
+                    contents=[
+                        TextComponent(text=f"{icon} {time_text}", size='xs', color='#aaaaaa'), 
+                        TextComponent(text=display_content, size='sm', color='#555555', wrap=True)
+                    ]
+                ),
+                ButtonComponent(
+                    style='link', 
+                    height='sm', 
+                    width='40px', 
+                    flex=0, 
+                    action=PostbackAction(label='❌', data=f'action=delete_single&id={event.id}')
+                )
             ]
         )
         body_contents.append(row)
         body_contents.append(SeparatorComponent(margin='sm'))
 
-    # 翻頁按鈕
+    # --- 4. 底部翻頁按鈕 ---
     footer_contents = []
     if end_index < total_events:
         next_page = page + 1
@@ -416,18 +481,24 @@ def create_management_flex(events, page=1):
 
     footer_contents.append(ButtonComponent(style='primary', color='#333333', action=PostbackAction(label=btn_label, data=btn_data)))
     
-    return BubbleContainer(header=header, body=BoxComponent(layout='vertical', contents=body_contents), footer=BoxComponent(layout='vertical', spacing='sm', contents=footer_contents))
+    return BubbleContainer(
+        header=header, 
+        body=BoxComponent(layout='vertical', contents=body_contents), 
+        footer=BoxComponent(layout='vertical', spacing='sm', contents=footer_contents)
+    )
 
 def handle_list_reminders(event, line_bot_api):
     user_id = event.source.user_id
     events = get_all_events_by_user(user_id)
-    if not events:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="您目前沒有設定任何提醒，好清閒！🍵"))
-        return
+
     bubble = create_management_flex(events, page=1)
+    
+    if not bubble:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="您目前沒有「進行中」的提醒喔！(已完成或未設定的已隱藏)"))
+        return
+        
     flex_message = FlexSendMessage(alt_text="提醒管理面板", contents=bubble)
     line_bot_api.reply_message(event.reply_token, flex_message)
-
 def handle_delete_reminder_command(event, line_bot_api, scheduler):
     user_id = event.source.user_id
     text = event.message.text.strip()
