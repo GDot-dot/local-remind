@@ -296,12 +296,18 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新資料庫失敗。"))
 
     elif action == 'snooze_reminder':
+        # --- 情境 A：延後 5 分鐘 ---
         event_record = get_event(event_id)
         if event_record and not event_record.is_recurring:
             minutes = int(data.get('minutes', 5))
             reset_reminder_sent_status(event_id)
             snooze_time = datetime.now(TAIPEI_TZ) + timedelta(minutes=minutes)
+            
             if safe_add_job_func(send_reminder_func, snooze_time, [event_id], f'reminder_{event_id}'):
+                
+                # ✅【關鍵 1】這裡要更新資料庫，清單才會變更
+                update_reminder_time(event_id, snooze_time)
+                
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⏰ 好的，{minutes}分鐘後再次提醒您！"))
             else:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 延後提醒設定失敗。"))
@@ -309,6 +315,7 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="週期性提醒或重要提醒不支援此延後功能。"))
 
     elif action == 'snooze_custom':
+        # --- 情境 B：自訂延後時間 ---
         event_record = get_event(event_id)
         if event_record and not event_record.is_recurring:
             selected_datetime_str = event.postback.params.get('datetime')
@@ -320,6 +327,7 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
                 return
 
             try:
+                # 解析時間格式
                 if len(selected_datetime_str) > 16:
                     dt_obj = datetime.strptime(selected_datetime_str, "%Y-%m-%dT%H:%M:%S")
                 else:
@@ -338,6 +346,10 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
             reset_reminder_sent_status(event_id)
             
             if safe_add_job_func(send_reminder_func, new_snooze_time, [event_id], f'reminder_{event_id}'):
+                
+                # ✅【關鍵 2】這裡也要更新資料庫！
+                update_reminder_time(event_id, new_snooze_time)
+                
                 formatted_time = new_snooze_time.strftime('%Y/%m/%d %H:%M')
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⏰ 好的，已將提醒延後至 {formatted_time}！"))
             else:
