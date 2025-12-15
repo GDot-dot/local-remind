@@ -368,8 +368,19 @@ def handle_message(event):
 
         # --- 4. AI 智慧解析區塊 ---
         # 條件：訊息長度 > 1 且不是上面那些指令
-        if len(text) > 1: 
-            # 這裡使用一個內部的 try，避免 AI 錯誤影響主程式
+        time_keywords = [
+            '明天', '後天', '今天', '下週', '下周', '禮拜', '星期', 
+            '點', '分', '早上', '下午', '晚上', '中午', '半', 
+            '提醒', '幫我', '記得', '後'
+        ]
+        
+        # 判斷邏輯：
+        # 1. 長度要大於 1
+        # 2. 必須包含至少一個時間關鍵字 (或者包含數字)
+        is_potential_reminder = any(k in text for k in time_keywords) or any(char.isdigit() for char in text)
+
+        # 【修改】加上 is_potential_reminder 判斷，沒關鍵字就不問 AI
+        if len(text) > 1 and is_potential_reminder: 
             try:
                 current_time_str = now_in_taipei.strftime('%Y-%m-%d %H:%M:%S')
                 ai_result = parse_natural_language(text, current_time_str)

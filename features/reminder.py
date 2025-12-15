@@ -423,7 +423,7 @@ def create_management_flex(events, page=1):
             # 顯示的是「實際會響鈴」的時間 (reminder_time)
             if event.reminder_time:
                 local_time = event.reminder_time.astimezone()
-                time_text = local_time.strftime('%m/%d %H:%M')
+                time_text = local_time.strftime('%Y/%m/%d %H:%M')
             else:
                 time_text = "未設定時間"
 
