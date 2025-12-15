@@ -288,3 +288,19 @@ def delete_event_by_id(event_id, user_id):
         finally:
             db.close()
     return safe_db_operation(_delete)
+    
+def update_event_snooze(event_id, reminder_dt, new_content):
+    """延後專用：同時更新提醒時間與內容"""
+    def _update():
+        db = next(get_db())
+        try:
+            event = db.query(Event).filter(Event.id == event_id).first()
+            if event:
+                event.reminder_time = reminder_dt
+                event.event_content = new_content  # 更新內容，加上 (延)
+                db.commit()
+                return True
+            return False
+        finally:
+            db.close()
+    return safe_db_operation(_update)

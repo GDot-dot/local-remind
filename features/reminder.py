@@ -11,7 +11,7 @@ from linebot.models import (
 )
 from db import (
     add_event, get_event, update_reminder_time, reset_reminder_sent_status,
-    get_all_events_by_user, delete_event_by_id
+    get_all_events_by_user, delete_event_by_id, update_event_snooze
 )
 
 WEEKDAYS_MAP = {"MON": "一", "TUE": "二", "WED": "三", "THU": "四", "FRI": "五", "SAT": "六", "SUN": "日"}
@@ -296,8 +296,7 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新資料庫失敗。"))
 
-    elif action == 'snooze_reminder':
-        # --- 情境 A：延後 5 分鐘 ---
+     elif action == 'snooze_reminder':
         event_record = get_event(event_id)
         if event_record and not event_record.is_recurring:
             minutes = int(data.get('minutes', 5))
@@ -306,17 +305,23 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
             
             if safe_add_job_func(send_reminder_func, snooze_time, [event_id], f'reminder_{event_id}'):
                 
-                # ✅【關鍵 1】這裡要更新資料庫，清單才會變更
-                update_reminder_time(event_id, snooze_time)
+                # 【修改】判斷是否已經有 (延)，沒有就加上去
+                current_content = event_record.event_content
+                if not current_content.startswith("(延)"):
+                    new_content = f"(延) {current_content}"
+                else:
+                    new_content = current_content
+                
+                # 更新資料庫 (時間 + 內容)
+                update_event_snooze(event_id, snooze_time, new_content)
                 
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⏰ 好的，{minutes}分鐘後再次提醒您！"))
             else:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 延後提醒設定失敗。"))
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="週期性提醒或重要提醒不支援此延後功能。"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="此功能不支援週期或重要提醒。"))
 
     elif action == 'snooze_custom':
-        # --- 情境 B：自訂延後時間 ---
         event_record = get_event(event_id)
         if event_record and not event_record.is_recurring:
             selected_datetime_str = event.postback.params.get('datetime')
@@ -324,16 +329,14 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
                  selected_datetime_str = event.postback.params.get('time') or event.postback.params.get('date')
 
             if not selected_datetime_str:
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 無法獲取選擇的時間。"))
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 無法獲取時間。"))
                 return
 
             try:
-                # 解析時間格式
                 if len(selected_datetime_str) > 16:
                     dt_obj = datetime.strptime(selected_datetime_str, "%Y-%m-%dT%H:%M:%S")
                 else:
                     dt_obj = datetime.strptime(selected_datetime_str, "%Y-%m-%dT%H:%M")
-                
                 new_snooze_time = TAIPEI_TZ.localize(dt_obj)
             except Exception as e:
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 時間格式錯誤"))
@@ -348,8 +351,15 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
             
             if safe_add_job_func(send_reminder_func, new_snooze_time, [event_id], f'reminder_{event_id}'):
                 
-                # ✅【關鍵 2】這裡也要更新資料庫！
-                update_reminder_time(event_id, new_snooze_time)
+                # 【修改】判斷是否已經有 (延)，沒有就加上去
+                current_content = event_record.event_content
+                if not current_content.startswith("(延)"):
+                    new_content = f"(延) {current_content}"
+                else:
+                    new_content = current_content
+
+                # 更新資料庫 (時間 + 內容)
+                update_event_snooze(event_id, new_snooze_time, new_content)
                 
                 formatted_time = new_snooze_time.strftime('%Y/%m/%d %H:%M')
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⏰ 好的，已將提醒延後至 {formatted_time}！"))
@@ -379,16 +389,12 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
 def create_management_flex(events, page=1):
     if not events: return None
     
-    # 定義台北時區
     TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 
-    # --- 1. 資料預處理與過濾 ---
     valid_events = []
     for event in events:
-        # 排除已完成且非週期性的任務
         if not event.is_recurring and event.reminder_sent == 1:
             continue
-        # 排除未設定時間的任務
         if not event.is_recurring and event.reminder_time is None:
             continue
         valid_events.append(event)
@@ -396,7 +402,6 @@ def create_management_flex(events, page=1):
     if not valid_events:
         return None
 
-    # --- 2. 分頁處理 ---
     ITEMS_PER_PAGE = 10
     total_events = len(valid_events)
     start_index = (page - 1) * ITEMS_PER_PAGE
@@ -406,7 +411,6 @@ def create_management_flex(events, page=1):
     if not display_events and page > 1:
         return create_management_flex(events, page=1)
 
-    # --- 3. 建立列表 ---
     header = BoxComponent(
         layout='vertical', 
         contents=[TextComponent(text=f'📋 提醒管理 ({page})', weight='bold', size='xl', color='#1DB446')]
@@ -420,7 +424,6 @@ def create_management_flex(events, page=1):
         time_text = "未設定"
 
         if event.is_recurring:
-            # 週期性提醒
             try:
                 rule_parts = event.recurrence_rule.split('|')
                 days_code = rule_parts[0].split(',')
@@ -432,31 +435,18 @@ def create_management_flex(events, page=1):
             icon = "🔄"
             
         else:
-            # 一次性提醒
             if event.reminder_time:
-                # 轉成台北時間顯示
                 local_time = event.reminder_time.astimezone(TAIPEI_TZ)
-                time_text = local_time.strftime('%Y/%m/%d %H:%M')
+                time_text = local_time.strftime('%m/%d %H:%M')
 
-                # --- 判斷是否為延後 (修正版邏輯) ---
-                # 只要「實際提醒時間」 >= 「事件原本時間」，就視為延後/貪睡
-                # 使用 timestamp() 比較最準確
-                rem_ts = event.reminder_time.timestamp()
-                evt_ts = event.event_datetime.timestamp() if event.event_datetime else 0
-                
-                # 容許 1 秒的誤差
-                if rem_ts >= (evt_ts - 1):
-                    icon = "💤"
-                    display_content = f"(延) {event.event_content}"
-                # --------------------------------
-
-            # 處理重要程度顏色 (僅在沒有延後時顯示顏色，或者你想保留顏色也可以調整)
-            if icon != "💤":
+            # --- 【修正】直接看文字有沒有 (延) ---
+            if "(延)" in display_content:
+                icon = "💤"
+            else:
                 if event.priority_level == 3: icon = "🔴"
                 elif event.priority_level == 2: icon = "🟡"
                 elif event.priority_level == 1: icon = "🟢"
 
-        # 建立單行組件
         row = BoxComponent(
             layout='horizontal', 
             margin='md', 
@@ -482,7 +472,6 @@ def create_management_flex(events, page=1):
         body_contents.append(row)
         body_contents.append(SeparatorComponent(margin='sm'))
 
-    # --- 4. 底部按鈕 ---
     footer_contents = []
     if end_index < total_events:
         next_page = page + 1
