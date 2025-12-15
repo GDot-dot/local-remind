@@ -26,7 +26,7 @@ def parse_natural_language(user_text, current_time_str):
 
         # 2. 直接指定模型 (省去查詢時間)
         # 根據你的 Log，你的帳號支援最新的 2.5 flash
-        target_model = 'gemini-2.0-flash'
+        target_model = 'gemini-1.5-flash'
         model = genai.GenerativeModel(target_model)
         
         prompt = f"""
