@@ -437,7 +437,7 @@ def create_management_flex(events, page=1):
         else:
             if event.reminder_time:
                 local_time = event.reminder_time.astimezone(TAIPEI_TZ)
-                time_text = local_time.strftime('%m/%d %H:%M')
+                time_text = local_time.strftime('%Y/%m/%d %H:%M')
 
             # --- 【修正】直接看文字有沒有 (延) ---
             if "(延)" in display_content:
