@@ -296,7 +296,7 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新資料庫失敗。"))
 
-     elif action == 'snooze_reminder':
+    elif action == 'snooze_reminder':
         event_record = get_event(event_id)
         if event_record and not event_record.is_recurring:
             minutes = int(data.get('minutes', 5))
