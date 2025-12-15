@@ -374,40 +374,39 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 刪除失敗。"))
 
 # --- Flex Message ---
+# features/reminder.py
+
 def create_management_flex(events, page=1):
     if not events: return None
     
-    # 確保使用台北時區
+    # 定義台北時區
     TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 
-    # --- 1. 資料預處理與過濾 (Filter) ---
+    # --- 1. 資料預處理與過濾 ---
     valid_events = []
     for event in events:
-        # A. 排除「已完成」的一次性任務
+        # 排除已完成且非週期性的任務
         if not event.is_recurring and event.reminder_sent == 1:
             continue
-
-        # B. 排除「未完成設定」的任務
+        # 排除未設定時間的任務
         if not event.is_recurring and event.reminder_time is None:
             continue
-            
         valid_events.append(event)
 
     if not valid_events:
         return None
 
-    # --- 2. 分頁邏輯 ---
+    # --- 2. 分頁處理 ---
     ITEMS_PER_PAGE = 10
     total_events = len(valid_events)
     start_index = (page - 1) * ITEMS_PER_PAGE
     end_index = start_index + ITEMS_PER_PAGE
-    
     display_events = valid_events[start_index:end_index]
     
     if not display_events and page > 1:
         return create_management_flex(events, page=1)
 
-    # --- 3. 建立 Flex Message ---
+    # --- 3. 建立列表 ---
     header = BoxComponent(
         layout='vertical', 
         contents=[TextComponent(text=f'📋 提醒管理 ({page})', weight='bold', size='xl', color='#1DB446')]
@@ -420,14 +419,13 @@ def create_management_flex(events, page=1):
         icon = "⏰"
         time_text = "未設定"
 
-        # 處理顯示文字與圖示
         if event.is_recurring:
             # 週期性提醒
             try:
                 rule_parts = event.recurrence_rule.split('|')
                 days_code = rule_parts[0].split(',')
-                time_str = rule_parts[1]
                 day_names = [WEEKDAYS_MAP.get(d, '') for d in days_code]
+                time_str = rule_parts[1]
                 time_text = f"每週{','.join(day_names)} {time_str}"
             except: 
                 time_text = "週期設定"
@@ -436,22 +434,27 @@ def create_management_flex(events, page=1):
         else:
             # 一次性提醒
             if event.reminder_time:
-                # 【修正 1】強制轉為台北時間顯示，避免顯示成 UTC
+                # 轉成台北時間顯示
                 local_time = event.reminder_time.astimezone(TAIPEI_TZ)
                 time_text = local_time.strftime('%Y/%m/%d %H:%M')
-            
-            # 處理重要程度顏色
-            if event.priority_level == 3: icon = "🔴"
-            elif event.priority_level == 2: icon = "🟡"
-            elif event.priority_level == 1: icon = "🟢"
 
-            # --- C. 判斷是否為「延後」任務 ---
-            # 【修正 2】改用 timestamp() 比較，無視時區差異，只要差超過 60 秒就算延後
-            if event.reminder_time and event.event_datetime:
-                # 如果 實際提醒時間戳記 > 原本事件時間戳記 + 60秒
-                if event.reminder_time.timestamp() > (event.event_datetime.timestamp() + 60):
+                # --- 判斷是否為延後 (修正版邏輯) ---
+                # 只要「實際提醒時間」 >= 「事件原本時間」，就視為延後/貪睡
+                # 使用 timestamp() 比較最準確
+                rem_ts = event.reminder_time.timestamp()
+                evt_ts = event.event_datetime.timestamp() if event.event_datetime else 0
+                
+                # 容許 1 秒的誤差
+                if rem_ts >= (evt_ts - 1):
+                    icon = "💤"
                     display_content = f"(延) {event.event_content}"
-                    icon = "💤" # 換成睡覺符號
+                # --------------------------------
+
+            # 處理重要程度顏色 (僅在沒有延後時顯示顏色，或者你想保留顏色也可以調整)
+            if icon != "💤":
+                if event.priority_level == 3: icon = "🔴"
+                elif event.priority_level == 2: icon = "🟡"
+                elif event.priority_level == 1: icon = "🟢"
 
         # 建立單行組件
         row = BoxComponent(
@@ -479,7 +482,7 @@ def create_management_flex(events, page=1):
         body_contents.append(row)
         body_contents.append(SeparatorComponent(margin='sm'))
 
-    # --- 4. 底部翻頁按鈕 ---
+    # --- 4. 底部按鈕 ---
     footer_contents = []
     if end_index < total_events:
         next_page = page + 1
