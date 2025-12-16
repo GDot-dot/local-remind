@@ -499,7 +499,7 @@ def handle_postback(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="操作已取消。"))
         elif action.startswith('loc_'):
             location.handle_location_postback(event, line_bot_api, user_states)
-        elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder', 'snooze_custom', 'set_priority', 'set_priority_time', 'delete_reminder_prompt', 'delete_single', 'refresh_manage_panel']:
+        elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder', 'snooze_custom', 'set_priority', 'set_priority_time', 'delete_reminder_prompt', 'delete_single', 'refresh_manage_panel', 'edit_prompt', 'edit_content_start', 'edit_time_confirm']:
             reminder.handle_reminder_postback(event, line_bot_api, scheduler, send_reminder, safe_add_job, TAIPEI_TZ, user_states)
         elif action in ['toggle_weekday', 'set_recurring_time']:
             recurring_reminder.handle_postback(event, line_bot_api, user_states)
