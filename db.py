@@ -415,3 +415,27 @@ def get_all_memories(user_id):
         finally:
             db.close()
     return safe_db_operation(_get_all)
+    
+def search_memories_by_keyword(user_id, keyword):
+    """模糊搜尋：回傳所有符合的記憶列表"""
+    def _search():
+        db = next(get_db())
+        try:
+            # 使用 ilike 做模糊搜尋，回傳所有符合的結果 (.all())
+            return db.query(Memory).filter(
+                Memory.user_id == user_id, 
+                Memory.keyword.ilike(f"%{keyword}%") 
+            ).all()
+        finally:
+            db.close()
+    return safe_db_operation(_search)
+
+def get_memory_by_id(memory_id):
+    """根據 ID 精準獲取單筆記憶 (按鈕回傳用)"""
+    def _get():
+        db = next(get_db())
+        try:
+            return db.query(Memory).filter(Memory.id == memory_id).first()
+        finally:
+            db.close()
+    return safe_db_operation(_get)
