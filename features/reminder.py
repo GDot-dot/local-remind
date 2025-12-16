@@ -367,7 +367,7 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 延後設定失敗。"))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="此提醒無法延後。"))
-     elif action == 'edit_prompt':
+    elif action == 'edit_prompt':
         event_record = get_event(event_id)
         if not event_record: return
 
