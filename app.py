@@ -514,7 +514,7 @@ def handle_postback(event):
         elif action in ['toggle_weekday', 'set_recurring_time']:
             recurring_reminder.handle_postback(event, line_bot_api, user_states)
         elif action == 'view_memory':
-        memory.handle_memory_postback(event, line_bot_api)
+            memory.handle_memory_postback(event, line_bot_api)
     except Exception as e:
         logger.error(f"Error in handle_postback: {e}", exc_info=True)
         
