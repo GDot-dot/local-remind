@@ -11,7 +11,7 @@ from linebot.models import (
 )
 from db import (
     add_event, get_event, update_reminder_time, reset_reminder_sent_status,
-    get_all_events_by_user, delete_event_by_id, update_event_snooze
+    get_all_events_by_user, delete_event_by_id, update_event_snooze,update_event_content, reschedule_event_time
 )
 
 WEEKDAYS_MAP = {"MON": "一", "TUE": "二", "WED": "三", "THU": "四", "FRI": "五", "SAT": "六", "SUN": "日"}
@@ -367,6 +367,60 @@ def handle_reminder_postback(event, line_bot_api, scheduler, send_reminder_func,
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 延後設定失敗。"))
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="此提醒無法延後。"))
+     elif action == 'edit_prompt':
+        event_record = get_event(event_id)
+        if not event_record: return
+
+        template = ButtonsTemplate(
+            text=f"您想修改「{event_record.event_content}」的什麼？",
+            actions=[
+                PostbackTemplateAction(label="📝 修改/補充內容", data=f"action=edit_content_start&id={event_id}"),
+                DatetimePickerTemplateAction(label="📅 修改時間", data=f"action=edit_time_confirm&id={event_id}", mode="datetime"),
+                PostbackTemplateAction(label="取消", data="action=cancel")
+            ]
+        )
+        line_bot_api.reply_message(event.reply_token, TemplateSendMessage(alt_text="編輯提醒", template=template))
+
+    # --- 編輯功能：準備修改內容 (進入 User State) ---
+    elif action == 'edit_content_start':
+        event_record = get_event(event_id)
+        if not event_record: return
+        
+        # 設定使用者狀態，等待輸入
+        user_states[user_id] = {
+            'action': 'awaiting_edit_content',
+            'event_id': event_id,
+            'original_content': event_record.event_content
+        }
+        
+        msg = (
+            f"目前內容：\n『{event_record.event_content}』\n\n"
+            "🔸 若要【覆蓋】，請直接輸入新內容。\n"
+            "🔸 若要【補充】，請輸入 + 開頭 (例如：+ 記得帶錢)。"
+        )
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=msg))
+
+    # --- 編輯功能：確認修改時間 ---
+    elif action == 'edit_time_confirm':
+        selected_datetime_str = event.postback.params.get('datetime')
+        try:
+            dt_obj = datetime.strptime(selected_datetime_str, "%Y-%m-%dT%H:%M")
+            new_time = TAIPEI_TZ.localize(dt_obj)
+            
+            if new_time <= datetime.now(TAIPEI_TZ):
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 修改的時間必須在未來喔！"))
+                return
+
+            # 更新資料庫
+            reschedule_event_time(event_id, new_time)
+            
+            # 更新排程
+            safe_add_job_func(send_reminder_func, new_time, [event_id], f'reminder_{event_id}')
+            
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 時間已修改為：{new_time.strftime('%Y/%m/%d %H:%M')}"))
+            
+        except Exception as e:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 時間格式錯誤"))
             
     elif action == 'delete_single':
         result = delete_event_by_id(event_id, user_id)
@@ -459,6 +513,15 @@ def create_management_flex(events, page=1):
                         TextComponent(text=f"{icon} {time_text}", size='xs', color='#aaaaaa'), 
                         TextComponent(text=display_content, size='sm', color='#555555', wrap=True)
                     ]
+                ),
+                # --- 【新增】編輯按鈕 ✏️ ---
+                ButtonComponent(
+                    style='secondary', 
+                    height='sm', 
+                    width='40px', 
+                    flex=0,
+                    margin='sm',
+                    action=PostbackAction(label='✏️', data=f'action=edit_prompt&id={event.id}')
                 ),
                 ButtonComponent(
                     style='link', 

@@ -336,6 +336,32 @@ def handle_message(event):
             elif state_action == 'setting_priority_time':
                  line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請點擊上方按鈕選擇時間。"))
                  return
+             # --- 【新增】編輯內容的狀態處理 ---
+            elif state_action == 'awaiting_edit_content':
+                event_id = user_states[user_id].get('event_id')
+                original_content = user_states[user_id].get('original_content')
+                
+                # 判斷是「補充」還是「覆蓋」
+                if text.startswith('+') or text.startswith('＋'):
+                    # 補充模式：去掉加號，接在後面
+                    append_text = text[1:].strip()
+                    new_content = f"{original_content} ({append_text})"
+                    mode_msg = "補充"
+                else:
+                    # 覆蓋模式
+                    new_content = text
+                    mode_msg = "修改"
+                
+                # 執行更新 (確保 update_event_content 有從 db 匯入，或是直接在這裡 import)
+                from db import update_event_content 
+                if update_event_content(event_id, new_content):
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已{mode_msg}內容為：\n{new_content}"))
+                else:
+                    line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新失敗，找不到該提醒。"))
+                
+                # 清除狀態
+                del user_states[user_id]
+                return
 
         # 3. 處理【固定指令】
         if text == '提醒清單':

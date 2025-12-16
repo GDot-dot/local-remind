@@ -304,3 +304,35 @@ def update_event_snooze(event_id, reminder_dt, new_content):
         finally:
             db.close()
     return safe_db_operation(_update)
+    
+def update_event_content(event_id, new_content):
+    """更新提醒內容"""
+    def _update():
+        db = next(get_db())
+        try:
+            event = db.query(Event).filter(Event.id == event_id).first()
+            if event:
+                event.event_content = new_content
+                db.commit()
+                return True
+            return False
+        finally:
+            db.close()
+    return safe_db_operation(_update)
+
+def reschedule_event_time(event_id, new_datetime):
+    """徹底修改提醒時間 (非延後，而是改期)"""
+    def _update():
+        db = next(get_db())
+        try:
+            event = db.query(Event).filter(Event.id == event_id).first()
+            if event:
+                event.event_datetime = new_datetime # 更新原始時間
+                event.reminder_time = new_datetime  # 更新提醒時間
+                event.reminder_sent = 0             # 重置發送狀態
+                db.commit()
+                return True
+            return False
+        finally:
+            db.close()
+    return safe_db_operation(_update)
