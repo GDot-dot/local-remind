@@ -24,7 +24,7 @@ import pytz
 from db import *
 from db import DATABASE_URL
 # 移除 scraper 匯入
-from features import reminder, location, recurring_reminder
+from features import reminder, location, recurring_reminder, memory
 
 # =========== 🔎 抓鬼大隊：開機檢查 (插入在最上面) ===========
 print("="*50)
@@ -283,6 +283,13 @@ def send_help_message(reply_token):
 
 --- 地點功能 ---
 地點：透過按鈕管理您的地點記錄。
+找地點 [名稱]：查詢已儲存的地點。
+
+--- 記憶功能 (金魚腦救星) ---
+記住 [關鍵字] [內容]：儲存重要資訊。
+查詢 [關鍵字]：叫出儲存的內容。
+忘記 [關鍵字]：刪除該筆記憶。
+記憶清單：查看所有已記住的關鍵字。
 
 --- 通用指令 ---
 取消：中斷目前所有操作。
@@ -387,6 +394,9 @@ def handle_message(event):
             return
         elif text == '地點清單' or text.lower() == '地點':
             location.handle_list_locations_command(event, line_bot_api)
+            return
+        elif text.startswith('記住') or text.startswith('查詢') or text.startswith('忘記') or text == '記憶清單':
+            memory.handle_memory_command(event, line_bot_api)
             return
         elif text.lower() in ['help', '說明', '幫助']:
             send_help_message(event.reply_token)

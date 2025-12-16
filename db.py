@@ -90,6 +90,17 @@ class Location(Base):
 
     def __repr__(self):
         return f"<Location(name='{self.name}', user_id='{self.user_id}')>"
+        
+class Memory(Base):
+    __tablename__ = 'memories'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    keyword = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    
+    def __repr__(self):
+        return f"<Memory(keyword='{self.keyword}', user_id='{self.user_id}')>"
 
 # ---------------------------------
 # 核心資料庫函式
@@ -336,3 +347,71 @@ def reschedule_event_time(event_id, new_datetime):
         finally:
             db.close()
     return safe_db_operation(_update)
+    
+def save_memory(user_id, keyword, content):
+    """儲存記憶 (如果關鍵字已存在則更新)"""
+    def _save():
+        db = next(get_db())
+        try:
+            # 先找找看有沒有舊的
+            existing = db.query(Memory).filter(
+                Memory.user_id == user_id, 
+                Memory.keyword == keyword
+            ).first()
+            
+            if existing:
+                existing.content = content # 更新
+                action = "更新"
+            else:
+                new_mem = Memory(user_id=user_id, keyword=keyword, content=content)
+                db.add(new_mem)
+                action = "新增"
+            
+            db.commit()
+            return action
+        finally:
+            db.close()
+    return safe_db_operation(_save)
+
+def get_memory(user_id, keyword):
+    """查詢單筆記憶"""
+    def _get():
+        db = next(get_db())
+        try:
+            # 支援模糊搜尋 (選擇性)
+            # 這裡示範精確搜尋，比較不會搜出太多雜訊
+            return db.query(Memory).filter(
+                Memory.user_id == user_id, 
+                Memory.keyword == keyword
+            ).first()
+        finally:
+            db.close()
+    return safe_db_operation(_get)
+
+def delete_memory(user_id, keyword):
+    """刪除記憶"""
+    def _delete():
+        db = next(get_db())
+        try:
+            mem = db.query(Memory).filter(
+                Memory.user_id == user_id, 
+                Memory.keyword == keyword
+            ).first()
+            if mem:
+                db.delete(mem)
+                db.commit()
+                return True
+            return False
+        finally:
+            db.close()
+    return safe_db_operation(_delete)
+
+def get_all_memories(user_id):
+    """列出所有關鍵字"""
+    def _get_all():
+        db = next(get_db())
+        try:
+            return db.query(Memory).filter(Memory.user_id == user_id).all()
+        finally:
+            db.close()
+    return safe_db_operation(_get_all)
