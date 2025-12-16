@@ -516,7 +516,7 @@ def create_management_flex(events, page=1):
                 ),
                 # --- 【新增】編輯按鈕 ✏️ ---
                 ButtonComponent(
-                    style='secondary', 
+                    style='link', 
                     height='sm', 
                     width='40px', 
                     flex=0,
