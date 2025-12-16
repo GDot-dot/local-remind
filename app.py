@@ -1,36 +1,62 @@
+# app.py (乾淨版 - 僅保留提醒與地點功能)
+
 import os
 import threading
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 import logging
-import pytz
+import atexit
 
+from features.ai_parser import parse_natural_language 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, PostbackEvent,
-    LocationMessage, TemplateSendMessage, ButtonsTemplate,
-    PostbackTemplateAction, DatetimePickerTemplateAction
+    LocationMessage, ConfirmTemplate, PostbackTemplateAction, TemplateSendMessage,
+    FlexSendMessage, QuickReply, QuickReplyButton, MessageAction,
+    PostbackAction, ButtonsTemplate, DatetimePickerTemplateAction
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.executors.pool import ThreadPoolExecutor
+import pytz
 
-# 匯入自定義模組
 from db import *
 from db import DATABASE_URL
+# 移除 scraper 匯入
 from features import reminder, location, recurring_reminder
-from features.ai_parser import parse_natural_language 
 
-# =========== 🔎 開機檢查 ===========
+# =========== 🔎 抓鬼大隊：開機檢查 (插入在最上面) ===========
 print("="*50)
 print("🚀 系統啟動，正在檢查環境變數...")
+all_keys = list(os.environ.keys())
+print(f"🔑 目前系統內有的變數名稱: {all_keys}")
+
+# 檢查 DATABASE_URL (對照組)
 if "DATABASE_URL" in os.environ:
     print("✅ DATABASE_URL: 存在")
 else:
     print("❌ DATABASE_URL: 消失了！")
+
+# 檢查 GOOGLE_API_KEY (實驗組)
+target_key = "GOOGLE_API_KEY"
+if target_key in os.environ:
+    val = os.environ[target_key]
+    print(f"✅ {target_key}: 存在！(長度: {len(val)})")
+else:
+    print(f"❌ {target_key}: 嚴重錯誤！找不到此變數！")
+    
+    # 模糊搜尋：看看有沒有長得很像的
+    for k in all_keys:
+        if "GOOGLE" in k:
+            print(f"⚠️ 發現疑似變數: '{k}' (長度: {len(k)}) <- 請檢查是否有空白鍵")
+
 print("="*50)
-# =================================
+# ========================================================
+
+
+
+
 
 app = Flask(__name__)
 user_states = {}
@@ -38,14 +64,14 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger('apscheduler').setLevel(logging.DEBUG) 
 logger = logging.getLogger(__name__)
 
-# --- 本機設定 (請確認 Fly.io Secrets 已設定，這裡僅為 fallback) ---
+# --- 本機設定 START ---
 LINE_CHANNEL_ACCESS_TOKEN = '0jtuGMTolXKvvsQmb3CcAoD9JdkADsDKe+xsICSU9xmIcdyHmAFCTPY3H04nI1DeHvD/SyMMj3qt/Rw+NEI6DsHk8n7qxJ4siyYKY3QxhrBWb9QAkPDDLsVCs6Xny+t+6QEVFvx3hVDUTWTe7AxdtQdB04t89/1O/w1cDnyilFU=' # 請填寫
 LINE_CHANNEL_SECRET = '74df866d9f3f4c47f3d5e86d67fcb673'
+# --- 本機設定 END ---
 
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 UTC_TZ = pytz.UTC
 
-# 排程器設定 (包含斷線重連機制)
 jobstores = {
     'default': SQLAlchemyJobStore(
         url=DATABASE_URL,
@@ -59,52 +85,80 @@ executors = {'default': ThreadPoolExecutor(max_workers=5)}
 job_defaults = {'coalesce': True, 'max_instances': 1, 'misfire_grace_time': 30}
 scheduler_lock = threading.Lock()
 scheduler = BackgroundScheduler(jobstores=jobstores, executors=executors, job_defaults=job_defaults, timezone=TAIPEI_TZ)
-
 def restore_jobs():
-    """從資料庫讀取舊任務並重新排程"""
+    """
+    從資料庫讀取所有「週期性提醒」與「未發送的一次性提醒」，
+    並將它們重新加入排程器。
+    """
     with app.app_context():
+        # 為了避免循環引用，這裡才 import db
         from db import get_db, Event
+        
         db = next(get_db())
         try:
             logger.info("♻️ 正在檢查並修復排程任務...")
-            # 1. 週期性提醒
+            
+            # 1. 找出所有【週期性提醒】(這些永遠需要被排程)
             recurring_events = db.query(Event).filter(Event.is_recurring == 1).all()
-            # 2. 未發送的一次性提醒
+            
+            # 2. 找出所有【未發送】且【時間在未來】的一次性提醒
             now = datetime.now(TAIPEI_TZ)
             future_events = db.query(Event).filter(
                 Event.reminder_sent == 0,
                 Event.is_recurring == 0,
-                Event.reminder_time > now 
+                Event.reminder_time > now # 注意：這裡是檢查 reminder_time
             ).all()
 
             all_events = recurring_events + future_events
             restored_count = 0
 
             for event in all_events:
+                # 根據事件類型決定 Job ID
                 job_id = f"recurring_{event.id}" if event.is_recurring else f"reminder_{event.id}"
+                
+                # 如果排程器裡還沒有這個任務，就加進去
                 if not scheduler.get_job(job_id):
                     try:
                         if event.is_recurring:
+                            # 解析週期規則 (例如: "MON,WED|23:00")
                             rule_parts = event.recurrence_rule.split('|')
-                            days_code = rule_parts[0].lower()
+                            days_code = rule_parts[0].lower() # mon,wed
                             time_parts = rule_parts[1].split(':')
+                            hour = int(time_parts[0])
+                            minute = int(time_parts[1])
+                            
                             scheduler.add_job(
-                                send_reminder, trigger='cron', args=[event.id], id=job_id,
-                                day_of_week=days_code, hour=int(time_parts[0]), minute=int(time_parts[1]),
-                                timezone=TAIPEI_TZ, replace_existing=True
-                            )
-                        else:
-                            run_date = event.reminder_time.astimezone(TAIPEI_TZ)
-                            scheduler.add_job(
-                                send_reminder, 'date', run_date=run_date, args=[event.id], id=job_id,
+                                send_reminder,
+                                trigger='cron',
+                                args=[event.id],
+                                id=job_id,
+                                day_of_week=days_code,
+                                hour=hour,
+                                minute=minute,
+                                timezone=TAIPEI_TZ,
                                 replace_existing=True
                             )
+                        else:
+                            # 一次性提醒
+                            run_date = event.reminder_time.astimezone(TAIPEI_TZ)
+                            scheduler.add_job(
+                                send_reminder, 
+                                'date', 
+                                run_date=run_date, 
+                                args=[event.id], 
+                                id=job_id,
+                                replace_existing=True
+                            )
+                        
                         restored_count += 1
+                        logger.info(f"  + 成功修復排程: ID {event.id} ({event.event_content})")
                     except Exception as e:
                         logger.error(f"  ! 修復 ID {event.id} 失敗: {e}")
+            
             logger.info(f"✅ 排程修復完成！共重新註冊 {restored_count} 個任務。")
+
         except Exception as e:
-            logger.error(f"❌ 排程修復錯誤: {e}")
+            logger.error(f"❌ 排程修復過程發生錯誤: {e}")
         finally:
             db.close()
 
@@ -114,7 +168,11 @@ def safe_start_scheduler():
             if not scheduler.running:
                 scheduler.start()
                 logger.info("Scheduler started successfully.")
+                
+                # 【關鍵修改】啟動後，立刻執行一次修復任務
+                # 使用 Thread 避免卡住 Web Server 啟動
                 threading.Thread(target=restore_jobs).start()
+                
         except Exception as e:
             logger.error(f"Failed to start scheduler: {e}")
 
@@ -134,24 +192,31 @@ def send_reminder(event_id):
         with app.app_context():
             event = get_event(event_id)
             if not event:
+                logger.warning(f"send_reminder: 找不到 event_id {event_id}，嘗試從排程器中移除。")
                 if scheduler.get_job(f"reminder_{event_id}"): scheduler.remove_job(f"reminder_{event_id}")
+                if scheduler.get_job(f"recurring_{event_id}"): scheduler.remove_job(f"recurring_{event_id}")
                 return
 
             if not event.is_recurring and event.reminder_sent:
+                logger.warning(f"send_reminder: event_id {event_id} 已發送，跳過。")
                 return
 
             destination_id = event.target_id
             display_name = event.target_display_name
             event_content = event.event_content
 
+            # --- 選擇樣板 ---
             if event.priority_level > 0:
+                # 重要提醒
                 from features.reminder import PRIORITY_RULES
+                color = PRIORITY_RULES[event.priority_level]['color']
                 icon = "🔴" if event.priority_level == 3 else "🟡" if event.priority_level == 2 else "🟢"
                 template = ButtonsTemplate(
-                    text=f"{icon} 重要提醒！\n\n@{display_name}\n記得要「{event_content}」！",
+                    text=f"{icon} 重要提醒！\n\n@{display_name}\n記得要「{event_content}」！\n(如果不確認，我會繼續提醒)",
                     actions=[PostbackTemplateAction(label="收到，停止提醒", data=f"action=confirm_reminder&id={event_id}")]
                 )
             elif not event.is_recurring:
+                # 普通一次性
                 event_dt = event.event_datetime.astimezone(TAIPEI_TZ)
                 time_info = f"在 {event_dt.strftime('%Y/%m/%d %H:%M')} "
                 template = ButtonsTemplate(
@@ -163,29 +228,40 @@ def send_reminder(event_id):
                     ]
                 )
             else:
+                # 週期性
+                time_info = ""
                 template = ButtonsTemplate(
-                    text=f"⏰ 提醒！\n\n@{display_name}\n記得要「{event_content}」喔！",
-                    actions=[PostbackTemplateAction(label="OK", data=f"action=confirm_reminder&id={event_id}")]
+                    text=f"⏰ 提醒！\n\n@{display_name}\n記得{time_info}要「{event_content}」喔！",
+                    actions=[
+                        PostbackTemplateAction(label="OK", data=f"action=confirm_reminder&id={event_id}")
+                    ]
                 )
 
-            line_bot_api.push_message(destination_id, TemplateSendMessage(alt_text=f"提醒：{event_content}", template=template))
+            template_message = TemplateSendMessage(alt_text=f"提醒：{event_content}", template=template)
+            line_bot_api.push_message(destination_id, template_message)
             logger.info(f"成功發送提醒 for event_id: {event_id}")
 
+            # --- 處理後續動作 ---
             if not event.is_recurring:
                 if event.priority_level > 0 and event.remaining_repeats > 0:
+                    # 重要提醒：重試
                     from features.reminder import PRIORITY_RULES
+                    from db import decrease_remaining_repeats
                     decrease_remaining_repeats(event_id)
                     interval = PRIORITY_RULES[event.priority_level]['interval']
                     next_time = datetime.now(TAIPEI_TZ) + timedelta(minutes=interval)
                     safe_add_job(send_reminder, next_time, [event_id], f'reminder_{event_id}')
+                    logger.info(f"重要提醒：已設定 {interval} 分鐘後重試。")
                 else:
+                    # 普通或次數用盡：標記完成並移除
                     mark_reminder_sent(event_id)
                     if scheduler.get_job(f"reminder_{event_id}"): scheduler.remove_job(f"reminder_{event_id}")
                     if event.priority_level > 0:
+                         from db import delete_event_by_id
                          delete_event_by_id(event_id, event.creator_user_id)
 
     except Exception as e:
-        logger.error(f"Error in send_reminder: {e}", exc_info=True)
+        logger.error(f"Error in send_reminder for event_id {event_id}: {e}", exc_info=True)
 
 def safe_add_job(func, run_date, args, job_id):
     try:
@@ -199,7 +275,18 @@ def safe_add_job(func, run_date, args, job_id):
         return False
 
 def send_help_message(reply_token):
-    help_text = "--- 提醒功能 ---\n提醒 [時間] [事項]\n重要提醒 [時間] [事項]\n週期提醒\n提醒清單\n\n--- 地點功能 ---\n地點\n找地點 [名稱]\n\n--- 其他 ---\n取消"
+    help_text = """--- 提醒功能 ---
+提醒 [誰] [日期] [時間] [事件]
+重要提醒 [誰] [日期] [時間] [事件]
+週期提醒：設定每日/每週重複提醒。
+提醒清單：查看與管理所有提醒。
+
+--- 地點功能 ---
+地點：透過按鈕管理您的地點記錄。
+
+--- 通用指令 ---
+取消：中斷目前所有操作。
+"""
     line_bot_api.reply_message(reply_token, TextSendMessage(text=help_text))
 
 @app.route("/callback", methods=['POST'])
@@ -208,20 +295,24 @@ def callback():
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError: abort(400)
-    except Exception as e: logger.error(f"Callback error: {e}", exc_info=True)
+    except InvalidSignatureError:
+        abort(400)
+    except Exception as e:
+        logger.error(f"Error in callback handler: {e}", exc_info=True)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text.strip()
     user_id = event.source.user_id
+    # 取得來源類型: 'user', 'group', or 'room'
     source_type = event.source.type
 
+    # 【重點】這裡開始 try，對應最後面的 except
     try:
         now_in_taipei = datetime.now(TAIPEI_TZ)
 
-        # 1. 優先處理【取消】
+        # 1. 優先處理【取消】指令
         if text == '取消':
             if user_id in user_states:
                 del user_states[user_id]
@@ -230,10 +321,9 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有進行中的操作喔！"))
             return
 
-        # 2. 處理【使用者狀態】
+        # 2. 處理【使用者狀態】(進行中的流程)
         if user_id in user_states:
             state_action = user_states[user_id].get('action')
-            
             if state_action == 'awaiting_loc_name':
                 location.handle_save_location_command(event, line_bot_api, user_states)
                 return
@@ -246,29 +336,32 @@ def handle_message(event):
             elif state_action == 'setting_priority_time':
                  line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請點擊上方按鈕選擇時間。"))
                  return
-                 
-            # --- 編輯內容處理 ---
+             # --- 【新增】編輯內容的狀態處理 ---
             elif state_action == 'awaiting_edit_content':
                 event_id = user_states[user_id].get('event_id')
                 original_content = user_states[user_id].get('original_content')
                 
+                # 判斷是「補充」還是「覆蓋」
                 if text.startswith('+') or text.startswith('＋'):
+                    # 補充模式：去掉加號，接在後面
                     append_text = text[1:].strip()
                     new_content = f"{original_content} ({append_text})"
                     mode_msg = "補充"
                 else:
+                    # 覆蓋模式
                     new_content = text
                     mode_msg = "修改"
                 
-                from db import update_event_content
+                # 執行更新 (確保 update_event_content 有從 db 匯入，或是直接在這裡 import)
+                from db import update_event_content 
                 if update_event_content(event_id, new_content):
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已{mode_msg}內容為：\n{new_content}"))
                 else:
                     line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 更新失敗，找不到該提醒。"))
                 
+                # 清除狀態
                 del user_states[user_id]
                 return
-            # ----------------
 
         # 3. 處理【固定指令】
         if text == '提醒清單':
@@ -299,10 +392,20 @@ def handle_message(event):
             send_help_message(event.reply_token)
             return
 
-        # 4. AI 解析
-        time_keywords = ['明天', '後天', '今天', '下週', '下周', '禮拜', '星期', '點', '分', '早上', '下午', '晚上', '中午', '半', '提醒', '幫我', '記得', '後', '買']
+        # --- 4. AI 智慧解析區塊 ---
+        # 條件：訊息長度 > 1 且不是上面那些指令
+        time_keywords = [
+            '明天', '後天', '今天', '下週', '下周', '禮拜', '星期', 
+            '點', '分', '早上', '下午', '晚上', '中午', '半', 
+            '提醒', '幫我', '記得', '後'
+        ]
+        
+        # 判斷邏輯：
+        # 1. 長度要大於 1
+        # 2. 必須包含至少一個時間關鍵字 (或者包含數字)
         is_potential_reminder = any(k in text for k in time_keywords) or any(char.isdigit() for char in text)
 
+        # 【修改】加上 is_potential_reminder 判斷，沒關鍵字就不問 AI
         if len(text) > 1 and is_potential_reminder: 
             try:
                 current_time_str = now_in_taipei.strftime('%Y-%m-%d %H:%M:%S')
@@ -311,26 +414,40 @@ def handle_message(event):
                 if ai_result:
                     parsed_dt_str = ai_result['event_datetime']
                     parsed_content = ai_result['event_content']
+                    
                     naive_dt = datetime.strptime(parsed_dt_str, "%Y-%m-%d %H:%M")
                     event_dt = TAIPEI_TZ.localize(naive_dt)
 
                     if event_dt <= now_in_taipei:
-                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="😅 AI 算出的時間已經過了，請再說一次。"))
+                        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="😅 AI 幫你算出來的時間已經過了，請再說一次。"))
                         return
 
+                    # 顯示名稱
                     try:
                         profile = line_bot_api.get_profile(user_id)
                         display_name = profile.display_name
                     except:
                         display_name = "您"
                     
-                    target_id = user_id
-                    if source_type == 'group': target_id = event.source.group_id
-                    elif source_type == 'room': target_id = event.source.room_id
+                    target_id = user_id # 預設為個人
+                    if source_type == 'group':
+                        target_id = event.source.group_id
+                    elif source_type == 'room':
+                        target_id = event.source.room_id
                     
-                    event_id = add_event(creator_user_id=user_id, target_id=target_id, target_type=source_type, display_name=display_name, content=parsed_content, event_datetime=event_dt, is_recurring=0)
+                    # 寫入資料庫
+                    event_id = add_event(
+                        creator_user_id=user_id,
+                        target_id=target_id,      # <--- 改用判斷後的 ID
+                        target_type=source_type,  # <--- 改用來源類型 (group/user)
+                        display_name=display_name,
+                        content=parsed_content,
+                        event_datetime=event_dt,
+                        is_recurring=0
+                    )
 
                     if event_id:
+                        # 跳出確認按鈕 (已更新為完整選項)
                         from features.reminder import QuickReply, QuickReplyButton, PostbackAction
                         quick_reply = QuickReply(items=[
                             QuickReplyButton(action=PostbackAction(label="10分鐘前", data=f"action=set_reminder&id={event_id}&type=minute&val=10")),
@@ -338,45 +455,67 @@ def handle_message(event):
                             QuickReplyButton(action=PostbackAction(label="1天前", data=f"action=set_reminder&id={event_id}&type=day&val=1")),
                             QuickReplyButton(action=PostbackAction(label="不提醒", data=f"action=set_reminder&id={event_id}&type=none")),
                         ])
-                        reply_text = f"🤖 AI 設定成功！\n\n時間：{event_dt.strftime('%Y/%m/%d %H:%M')}\n事項：{parsed_content}\n\n要提早提醒嗎？"
+                        
+                        reply_text = f"🤖 AI 設定提醒成功！\n\n時間：{event_dt.strftime('%Y/%m/%d %H:%M')}\n事項：{parsed_content}\n\n要提早提醒嗎？"
                         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text, quick_reply=quick_reply))
                         return
             except Exception as e:
                 logger.error(f"AI Logic Error: {e}")
+                # AI 失敗就繼續往下走
         
-        # 5. 最終防線
+        # --- 5. 最終防線 (解決群組太吵) ---
         if source_type == 'user':
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🤔 我聽不太懂，請輸入「說明」查看指令。"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🤔 我聽不太懂，您可以試著說：「明天早上九點提醒我開會」或是輸入「說明」查看指令。"))
+        else:
+            # 群組裡聽不懂就安靜
+            return
 
+    # 【重點】這裡的 except 必須跟最上面的 try 對齊
     except Exception as e:
         logger.error(f"Error in handle_message: {e}", exc_info=True)
         try:
-            if source_type == 'user': line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 系統錯誤，請聯繫開發者。"))
-        except: pass
+            # 只有私訊才回報錯誤，避免群組洗頻
+            if source_type == 'user':
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 處理訊息時發生錯誤，請聯繫開發者。"))
+        except:
+            pass
 
 @handler.add(MessageEvent, message=LocationMessage)
 def handle_location_message(event):
-    location.handle_location_message(event, line_bot_api, user_states)
+    try:
+        location.handle_location_message(event, line_bot_api, user_states)
+    except Exception as e:
+        logger.error(f"Error in handle_location_message: {e}", exc_info=True)
 
 @handler.add(PostbackEvent)
 def handle_postback(event):
-    data = dict(x.split('=', 1) for x in event.postback.data.split('&'))
-    action = data.get('action', '')
-    user_id = event.source.user_id
-    
-    if action == 'cancel':
-        if user_id in user_states: del user_states[user_id]
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="操作已取消。"))
-    elif action.startswith('loc_'):
-        location.handle_location_postback(event, line_bot_api, user_states)
-    elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder', 'snooze_custom', 'set_priority', 'set_priority_time', 'delete_reminder_prompt', 'delete_single', 'refresh_manage_panel', 'edit_prompt', 'edit_content_start', 'edit_time_confirm']:
-        # 記得加入 'edit_prompt' 等新的 action 到這裡
-        reminder.handle_reminder_postback(event, line_bot_api, scheduler, send_reminder, safe_add_job, TAIPEI_TZ, user_states)
-    elif action in ['toggle_weekday', 'set_recurring_time']:
-        recurring_reminder.handle_postback(event, line_bot_api, user_states)
-
+    try:
+        data = dict(x.split('=', 1) for x in event.postback.data.split('&'))
+        action = data.get('action', '')
+        user_id = event.source.user_id
+        
+        if action == 'cancel':
+            if user_id in user_states: del user_states[user_id]
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="操作已取消。"))
+        elif action.startswith('loc_'):
+            location.handle_location_postback(event, line_bot_api, user_states)
+        elif action in ['set_reminder', 'confirm_reminder', 'snooze_reminder', 'snooze_custom', 'set_priority', 'set_priority_time', 'delete_reminder_prompt', 'delete_single', 'refresh_manage_panel']:
+            reminder.handle_reminder_postback(event, line_bot_api, scheduler, send_reminder, safe_add_job, TAIPEI_TZ, user_states)
+        elif action in ['toggle_weekday', 'set_recurring_time']:
+            recurring_reminder.handle_postback(event, line_bot_api, user_states)
+    except Exception as e:
+        logger.error(f"Error in handle_postback: {e}", exc_info=True)
+        
 @app.route("/health")
-def health_check(): return {"status": "healthy", "scheduler_running": scheduler.running}
+def health_check():
+    return {"status": "healthy", "scheduler_running": scheduler.running}
 
+@app.route("/")
+def index():
+    return "LINE Bot Reminder Service is running!"
+
+# ---------------------------------
+# 主程式進入點 (移除 multiprocessing)
+# ---------------------------------
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000, debug=False)
