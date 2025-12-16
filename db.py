@@ -101,6 +101,17 @@ class Memory(Base):
     
     def __repr__(self):
         return f"<Memory(keyword='{self.keyword}', user_id='{self.user_id}')>"
+        
+class UserCard(Base):
+    __tablename__ = 'user_cards'
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    card_name = Column(String, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    def __repr__(self):
+        return f"<UserCard(name='{self.card_name}', user_id='{self.user_id}')>"
+
 
 # ---------------------------------
 # 核心資料庫函式
@@ -439,3 +450,52 @@ def get_memory_by_id(memory_id):
         finally:
             db.close()
     return safe_db_operation(_get)
+    
+# ---------------------------------
+# 【新增】信用卡功能函式
+# ---------------------------------
+
+def add_user_card(user_id, card_name):
+    def _add():
+        db = next(get_db())
+        try:
+            exists = db.query(UserCard).filter(
+                UserCard.user_id == user_id, 
+                UserCard.card_name == card_name
+            ).first()
+            if exists: return "已存在"
+            
+            new_card = UserCard(user_id=user_id, card_name=card_name)
+            db.add(new_card)
+            db.commit()
+            return "成功"
+        finally:
+            db.close()
+    return safe_db_operation(_add)
+
+def get_user_cards(user_id):
+    def _get():
+        db = next(get_db())
+        try:
+            cards = db.query(UserCard).filter(UserCard.user_id == user_id).all()
+            return [c.card_name for c in cards]
+        finally:
+            db.close()
+    return safe_db_operation(_get)
+
+def delete_user_card(user_id, card_name):
+    def _delete():
+        db = next(get_db())
+        try:
+            card = db.query(UserCard).filter(
+                UserCard.user_id == user_id, 
+                UserCard.card_name == card_name
+            ).first()
+            if card:
+                db.delete(card)
+                db.commit()
+                return True
+            return False
+        finally:
+            db.close()
+    return safe_db_operation(_delete)

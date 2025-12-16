@@ -24,7 +24,7 @@ import pytz
 from db import *
 from db import DATABASE_URL
 # 移除 scraper 匯入
-from features import reminder, location, recurring_reminder, memory
+from features import reminder, location, recurring_reminder, memory, credit_card
 
 # =========== 🔎 抓鬼大隊：開機檢查 (插入在最上面) ===========
 print("="*50)
@@ -369,6 +369,54 @@ def handle_message(event):
                 # 清除狀態
                 del user_states[user_id]
                 return
+                
+        if text.startswith('新增卡片'):
+            card_name = text.replace('新增卡片', '').strip()
+            if not card_name:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 請輸入卡片名稱。\n範例：新增卡片 國泰CUBE"))
+                return
+            
+            result = add_user_card(user_id, card_name)
+            if result == "成功":
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已新增卡片：{card_name}"))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⚠️ 新增失敗：{result} (可能已存在)"))
+            return
+
+        elif text.startswith('刪除卡片'):
+            card_name = text.replace('刪除卡片', '').strip()
+            if delete_user_card(user_id, card_name):
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🗑️ 已刪除卡片：{card_name}"))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 找不到卡片：{card_name}"))
+            return
+
+        elif text == '我的卡包':
+            cards = get_user_cards(user_id)
+            if cards:
+                cards_str = "\n".join([f"💳 {c}" for c in cards])
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"您的信用卡：\n{cards_str}"))
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="您還沒有設定任何信用卡喔！\n請輸入：新增卡片 [名稱]"))
+            return
+
+        # --- 【新增】刷卡回饋查詢 ---
+        elif text.startswith('刷 '):
+            merchant = text[2:].strip() # 去掉前面的 "刷 "
+            if not merchant: return
+            
+            # 為了避免使用者等待太久以為當機，可以先回傳一個 Loading 動畫或是文字
+            # 但 LINE Reply Token 只能用一次，所以我們直接讓它轉圈圈等待 AI 回覆
+            # 若要優化體驗，建議未來可以用 Push Message 做「查詢中...」的效果
+            
+            try:
+                # 呼叫 features/credit_card.py 裡的分析函式
+                analysis_result = credit_card.analyze_best_card(user_id, merchant)
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=analysis_result))
+            except Exception as e:
+                logger.error(f"Credit Card Analysis Error: {e}")
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 分析失敗，請稍後再試。"))
+            return
 
         # 3. 處理【固定指令】
         if text == '提醒清單':
