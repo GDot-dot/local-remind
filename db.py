@@ -382,7 +382,7 @@ def get_memory(user_id, keyword):
             # 這裡示範精確搜尋，比較不會搜出太多雜訊
             return db.query(Memory).filter(
                 Memory.user_id == user_id, 
-                Memory.keyword == keyword
+                Memory.keyword.ilike(f"%{keyword}%")
             ).first()
         finally:
             db.close()
